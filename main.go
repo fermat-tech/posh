@@ -8,11 +8,13 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strings"
 	"syscall"
 
 	"github.com/chzyer/readline"
 	"github.com/fermat-tech/posh/internal/eval"
+	"github.com/fermat-tech/posh/internal/parser"
 	"github.com/mattn/go-colorable"
 	"github.com/mattn/go-isatty"
 )
@@ -27,13 +29,6 @@ func init() {
 var colorStdout = colorable.NewColorableStdout()
 var colorStderr = colorable.NewColorableStderr()
 
-func useColor() bool {
-	if _, ok := os.LookupEnv("NO_COLOR"); ok {
-		return false
-	}
-	return isatty.IsTerminal(os.Stdout.Fd()) || isatty.IsCygwinTerminal(os.Stdout.Fd())
-}
-
 func main() {
 	args := os.Args[1:]
 	sh := eval.New(progName)
@@ -42,8 +37,7 @@ func main() {
 
 	// -c "command"
 	if len(args) >= 2 && args[0] == "-c" {
-		cmd := args[1]
-		code := sh.EvalString(cmd)
+		code := sh.EvalString(args[1])
 		os.Exit(code)
 	}
 
@@ -54,16 +48,16 @@ func main() {
 			fmt.Fprintf(colorStderr, "%s: cannot open %q: %v\n", progName, args[0], err)
 			os.Exit(1)
 		}
+		sh.SetPosParams(args[1:])
 		code := sh.EvalString(string(data))
 		os.Exit(code)
 	}
 
-	// Interactive REPL
 	runREPL(sh)
 }
 
 func runREPL(sh *eval.Shell) {
-	// Source ~/.poshrc if it exists
+	// Source ~/.poshrc
 	home, _ := os.UserHomeDir()
 	rcPath := filepath.Join(home, ".poshrc")
 	if data, err := os.ReadFile(rcPath); err == nil {
@@ -74,7 +68,6 @@ func runREPL(sh *eval.Shell) {
 	isInteractive := isatty.IsTerminal(os.Stdin.Fd()) || isatty.IsCygwinTerminal(os.Stdin.Fd())
 
 	if !isInteractive {
-		// Non-interactive: read from stdin line by line
 		runNonInteractive(sh)
 		return
 	}
@@ -84,15 +77,15 @@ func runREPL(sh *eval.Shell) {
 		HistoryLimit:    1000,
 		InterruptPrompt: "^C",
 		EOFPrompt:       "exit",
+		AutoComplete:    newCompleter(sh),
 	})
 	if err != nil {
-		// Fallback to dumb line reader
 		runDumb(sh)
 		return
 	}
 	defer rl.Close()
 
-	// Forward sigint to the readline instance (interrupts current read, not the shell)
+	// Ctrl+C: interrupt current command, return to prompt
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT)
 	go func() {
@@ -103,8 +96,9 @@ func runREPL(sh *eval.Shell) {
 	}()
 
 	for {
+		// Multi-line input: keep reading until the command is complete
 		rl.SetPrompt(buildPrompt(sh))
-		line, err := rl.Readline()
+		input, err := readMultiLine(rl, sh)
 		if err == readline.ErrInterrupt {
 			fmt.Fprintln(sh.Stderr)
 			continue
@@ -113,43 +107,213 @@ func runREPL(sh *eval.Shell) {
 			fmt.Fprintln(sh.Stdout)
 			break
 		}
-		line = strings.TrimSpace(line)
-		if line == "" {
+		input = strings.TrimSpace(input)
+		if input == "" {
 			continue
 		}
-		sh.History = append(sh.History, line)
-		sh.EvalString(line)
+		sh.History = append(sh.History, input)
+		sh.EvalString(input)
+	}
+}
+
+// readMultiLine reads one complete shell command, prompting for more lines
+// when the input appears incomplete (open compound commands, trailing operators).
+func readMultiLine(rl *readline.Instance, sh *eval.Shell) (string, error) {
+	var lines []string
+
+	for {
+		line, err := rl.Readline()
+		if err != nil {
+			if len(lines) == 0 {
+				return "", err
+			}
+			// Return what we have on EOF/interrupt
+			return strings.Join(lines, "\n"), err
+		}
+		lines = append(lines, line)
+		full := strings.Join(lines, "\n")
+
+		if !parser.NeedsContinuation(full) {
+			return full, nil
+		}
+		// Need more input
+		rl.SetPrompt("> ")
 	}
 }
 
 func runNonInteractive(sh *eval.Shell) {
 	sc := bufio.NewScanner(os.Stdin)
+	var lines []string
 	for sc.Scan() {
-		line := strings.TrimSpace(sc.Text())
-		if line == "" || strings.HasPrefix(line, "#") {
+		line := sc.Text()
+		lines = append(lines, line)
+		full := strings.Join(lines, "\n")
+		if parser.NeedsContinuation(full) {
 			continue
 		}
-		sh.EvalString(line)
+		trimmed := strings.TrimSpace(full)
+		if trimmed != "" && !strings.HasPrefix(trimmed, "#") {
+			sh.EvalString(full)
+		}
+		lines = nil
+	}
+	if len(lines) > 0 {
+		sh.EvalString(strings.Join(lines, "\n"))
 	}
 }
 
 func runDumb(sh *eval.Shell) {
 	sc := bufio.NewScanner(os.Stdin)
+	var lines []string
 	for {
-		fmt.Fprint(sh.Stdout, buildPrompt(sh))
+		if len(lines) == 0 {
+			fmt.Fprint(sh.Stdout, buildPrompt(sh))
+		} else {
+			fmt.Fprint(sh.Stdout, "> ")
+		}
 		if !sc.Scan() {
 			break
 		}
-		line := strings.TrimSpace(sc.Text())
-		if line == "" {
+		line := sc.Text()
+		lines = append(lines, line)
+		full := strings.Join(lines, "\n")
+		if parser.NeedsContinuation(full) {
 			continue
 		}
-		sh.History = append(sh.History, line)
-		sh.EvalString(line)
+		trimmed := strings.TrimSpace(full)
+		if trimmed != "" {
+			sh.History = append(sh.History, trimmed)
+			sh.EvalString(full)
+		}
+		lines = nil
 	}
 }
 
-// buildPrompt renders the PS1 prompt string.
+// ---- tab completion ----
+
+type poshCompleter struct {
+	sh *eval.Shell
+}
+
+func newCompleter(sh *eval.Shell) readline.AutoCompleter {
+	return &poshCompleter{sh: sh}
+}
+
+func (c *poshCompleter) Do(line []rune, pos int) (newLine [][]rune, length int) {
+	full := string(line[:pos])
+	// Find the current word being typed
+	wordStart := strings.LastIndexAny(full, " \t|&;(") + 1
+	prefix := full[wordStart:]
+	isFirstWord := strings.TrimSpace(full[:wordStart]) == "" ||
+		strings.ContainsAny(strings.TrimRight(full[:wordStart], " \t"), "|&;(")
+
+	var candidates []string
+
+	if isFirstWord {
+		// Complete commands: builtins + functions + PATH executables
+		candidates = c.commandCandidates(prefix)
+	} else {
+		// Complete filenames
+		candidates = c.fileCandidates(prefix)
+	}
+
+	sort.Strings(candidates)
+
+	var completions [][]rune
+	for _, cand := range candidates {
+		if strings.HasPrefix(cand, prefix) {
+			completions = append(completions, []rune(cand[len(prefix):]))
+		}
+	}
+	return completions, len(prefix)
+}
+
+var builtinNames = []string{
+	"cd", "pwd", "echo", "printf", "exit", "export", "unset", "env", "set",
+	"source", ".", "alias", "unalias", "history", "type", "help", "true",
+	"false", ":", "jobs", "fg", "bg", "wait", "test", "[", "break",
+	"continue", "return", "read", "shift", "trap",
+}
+
+func (c *poshCompleter) commandCandidates(prefix string) []string {
+	seen := make(map[string]bool)
+	var out []string
+
+	// Builtins
+	for _, b := range builtinNames {
+		if strings.HasPrefix(b, prefix) && !seen[b] {
+			seen[b] = true
+			out = append(out, b)
+		}
+	}
+
+	// PATH executables
+	pathExts := strings.Split(os.Getenv("PATHEXT"), string(os.PathListSeparator))
+	for _, dir := range strings.Split(os.Getenv("PATH"), string(os.PathListSeparator)) {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			continue
+		}
+		for _, e := range entries {
+			name := e.Name()
+			base := strings.ToLower(name)
+			for _, ext := range pathExts {
+				if strings.HasSuffix(base, strings.ToLower(ext)) {
+					stem := name[:len(name)-len(ext)]
+					if strings.HasPrefix(strings.ToLower(stem), strings.ToLower(prefix)) && !seen[stem] {
+						seen[stem] = true
+						out = append(out, stem)
+					}
+				}
+			}
+			if strings.HasPrefix(strings.ToLower(name), strings.ToLower(prefix)) && !seen[name] {
+				seen[name] = true
+				out = append(out, name)
+			}
+		}
+	}
+
+	return out
+}
+
+func (c *poshCompleter) fileCandidates(prefix string) []string {
+	dir := filepath.Dir(prefix)
+	base := filepath.Base(prefix)
+	if prefix == "" || strings.HasSuffix(prefix, "/") || strings.HasSuffix(prefix, "\\") {
+		dir = prefix
+		base = ""
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		// Try current directory
+		entries, err = os.ReadDir(".")
+		if err != nil {
+			return nil
+		}
+		dir = "."
+	}
+
+	var out []string
+	for _, e := range entries {
+		name := e.Name()
+		if !strings.HasPrefix(strings.ToLower(name), strings.ToLower(base)) {
+			continue
+		}
+		candidate := filepath.Join(dir, name)
+		if dir == "." && !strings.Contains(prefix, "/") && !strings.Contains(prefix, "\\") {
+			candidate = name
+		}
+		if e.IsDir() {
+			candidate += string(os.PathSeparator)
+		}
+		out = append(out, candidate)
+	}
+	return out
+}
+
+// ---- prompt ----
+
 func buildPrompt(sh *eval.Shell) string {
 	ps1 := sh.GetVar("PS1")
 	if ps1 == "" {
@@ -180,7 +344,7 @@ func expandPS1(ps1 string, sh *eval.Shell) string {
 			wd, _ := os.Getwd()
 			sb.WriteString(filepath.Base(wd))
 		case '$':
-			if os.Geteuid() == 0 {
+			if os.Getuid() == 0 {
 				sb.WriteByte('#')
 			} else {
 				sb.WriteByte('$')

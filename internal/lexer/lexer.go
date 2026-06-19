@@ -24,8 +24,12 @@ const (
 	REDIR_ERR                      // 2>
 	REDIR_ERR_APPEND               // 2>>
 	REDIR_BOTH                     // &> or 2>&1
+	HEREDOC_OP                     // <<
+	HEREDOC_STRIP_OP               // <<-
 	LPAREN                         // (
 	RPAREN                         // )
+	LBRACE                         // {
+	RBRACE                         // }
 	NEWLINE                        // \n
 	EOF
 )
@@ -58,10 +62,18 @@ func (t TokenType) String() string {
 		return "2>>"
 	case REDIR_BOTH:
 		return "&>"
+	case HEREDOC_OP:
+		return "<<"
+	case HEREDOC_STRIP_OP:
+		return "<<-"
 	case LPAREN:
 		return "("
 	case RPAREN:
 		return ")"
+	case LBRACE:
+		return "{"
+	case RBRACE:
+		return "}"
 	case NEWLINE:
 		return "NEWLINE"
 	case EOF:
@@ -166,6 +178,16 @@ func (l *Lexer) Tokenize() []Token {
 			tokens = append(tokens, Token{Type: RPAREN})
 			wordPos = false
 
+		case ch == '{':
+			l.advance()
+			tokens = append(tokens, Token{Type: LBRACE})
+			wordPos = false
+
+		case ch == '}':
+			l.advance()
+			tokens = append(tokens, Token{Type: RBRACE})
+			wordPos = false
+
 		case ch == '|':
 			l.advance()
 			next, _ := l.peek()
@@ -204,7 +226,19 @@ func (l *Lexer) Tokenize() []Token {
 
 		case ch == '<':
 			l.advance()
-			tokens = append(tokens, Token{Type: REDIR_IN})
+			next, _ := l.peek()
+			if next == '<' {
+				l.advance()
+				n2, _ := l.peek()
+				if n2 == '-' {
+					l.advance()
+					tokens = append(tokens, Token{Type: HEREDOC_STRIP_OP})
+				} else {
+					tokens = append(tokens, Token{Type: HEREDOC_OP})
+				}
+			} else {
+				tokens = append(tokens, Token{Type: REDIR_IN})
+			}
 			wordPos = false
 
 		default:
@@ -214,7 +248,6 @@ func (l *Lexer) Tokenize() []Token {
 				if next == '>' {
 					l.advance() // consume '2'
 					l.advance() // consume '>'
-					// Check for 2>> or 2>&1
 					n2, _ := l.peek()
 					if n2 == '>' {
 						l.advance()
@@ -238,21 +271,23 @@ func (l *Lexer) Tokenize() []Token {
 				}
 			}
 
-			// Read a word token
 			w := l.readWord()
-			// Detect VAR=val assignment at command-start position
 			if !wordPos && isAssignment(w) {
 				tokens = append(tokens, Token{Type: ASSIGN, Val: w})
 			} else {
 				tokens = append(tokens, Token{Type: WORD, Val: w})
 				wordPos = true
+				// Keywords that open a new command context reset the assignment position.
+				switch w {
+				case "do", "then", "else", "elif":
+					wordPos = false
+				}
 			}
 		}
 	}
 	return tokens
 }
 
-// isAssignment returns true if s looks like NAME=... (no word boundary chars before =).
 func isAssignment(s string) bool {
 	idx := strings.IndexByte(s, '=')
 	if idx <= 0 {
@@ -270,7 +305,6 @@ func isAssignment(s string) bool {
 	return true
 }
 
-// readWord reads a possibly-quoted, possibly-escaped word from the input.
 func (l *Lexer) readWord() string {
 	var sb strings.Builder
 	for {
@@ -301,6 +335,25 @@ func (l *Lexer) readWord() string {
 				l.advance()
 				sb.WriteRune(next)
 			}
+		case '$':
+			l.advance()
+			sb.WriteRune('$')
+			ch2, ok2 := l.peek()
+			if !ok2 {
+				break
+			}
+			if ch2 == '(' {
+				// $(...) command substitution or $((...)) arithmetic — read to matching )
+				l.advance()
+				sb.WriteByte('(')
+				l.readNestedParens(&sb)
+			} else if ch2 == '{' {
+				// ${...} variable substitution — read to matching }
+				l.advance()
+				sb.WriteByte('{')
+				l.readUntilClose('{', '}', &sb)
+			}
+			// else: $VAR — variable name will be read as ordinary chars in next iterations
 		default:
 			l.advance()
 			sb.WriteRune(ch)
@@ -309,7 +362,6 @@ func (l *Lexer) readWord() string {
 	return sb.String()
 }
 
-// readSingleQuoted reads until the closing ' (no escape processing).
 func (l *Lexer) readSingleQuoted() string {
 	var sb strings.Builder
 	for {
@@ -326,11 +378,11 @@ func (l *Lexer) readSingleQuoted() string {
 	return sb.String()
 }
 
-// readDoubleQuoted reads until the closing " with escape and var/cmd substitution markers preserved.
-// We keep the double-quote delimiters in the token so the evaluator can distinguish them.
+// readDoubleQuoted stores content with leading/trailing " sentinels so the evaluator
+// can distinguish double-quoted strings from bare words.
 func (l *Lexer) readDoubleQuoted() string {
 	var sb strings.Builder
-	sb.WriteByte('"') // opening sentinel for evaluator
+	sb.WriteByte('"')
 	for {
 		ch, ok := l.peek()
 		if !ok || ch == '"' {
@@ -363,15 +415,60 @@ func (l *Lexer) readDoubleQuoted() string {
 			sb.WriteRune(ch)
 		}
 	}
-	sb.WriteByte('"') // closing sentinel
+	sb.WriteByte('"')
 	return sb.String()
 }
 
-// isWordStop returns true for characters that terminate a bare word.
+// readNestedParens reads everything up to the matching ) including nested (...).
+// The opening ( has already been consumed and written; this writes the rest through ).
+func (l *Lexer) readNestedParens(sb *strings.Builder) {
+	depth := 1
+	for depth > 0 {
+		ch, ok := l.peek()
+		if !ok {
+			break
+		}
+		l.advance()
+		sb.WriteRune(ch)
+		if ch == '(' {
+			depth++
+		} else if ch == ')' {
+			depth--
+		} else if ch == '\'' {
+			// single-quoted inside $() — read literally
+			sb.WriteString(l.readSingleQuoted())
+			sb.WriteByte('\'')
+		} else if ch == '"' {
+			dq := l.readDoubleQuoted()
+			sb.WriteString(dq[:len(dq)-1]) // strip trailing sentinel, re-add below
+			sb.WriteByte('"')
+		}
+	}
+}
+
+// readUntilClose reads from the current position to the matching close rune.
+// The opening rune has already been consumed; this writes content through the closing rune.
+func (l *Lexer) readUntilClose(open, close rune, sb *strings.Builder) {
+	depth := 1
+	for depth > 0 {
+		ch, ok := l.peek()
+		if !ok {
+			break
+		}
+		l.advance()
+		sb.WriteRune(ch)
+		if ch == open {
+			depth++
+		} else if ch == close {
+			depth--
+		}
+	}
+}
+
 func isWordStop(ch rune) bool {
 	switch ch {
 	case ' ', '\t', '\r', '\n',
-		'|', '&', ';', '(', ')',
+		'|', '&', ';', '(', ')', '{', '}',
 		'>', '<', '#':
 		return true
 	}

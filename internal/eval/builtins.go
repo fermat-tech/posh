@@ -1,6 +1,7 @@
 package eval
 
 import (
+	"bufio"
 	"fmt"
 	"io"
 	"os"
@@ -12,7 +13,6 @@ import (
 // builtinFn is the signature for all built-in command implementations.
 type builtinFn func(sh *Shell, args []string, stdin io.Reader, stdout, stderr io.Writer) int
 
-// builtins maps command name → implementation.
 var builtins map[string]builtinFn
 
 func init() {
@@ -37,10 +37,21 @@ func init() {
 		"false":   func(_ *Shell, _ []string, _ io.Reader, _, _ io.Writer) int { return 1 },
 		":":       func(_ *Shell, _ []string, _ io.Reader, _, _ io.Writer) int { return 0 },
 		"jobs":    builtinJobs,
+		"test":    builtinTest,
+		"[":       builtinTestBracket,
+		"break":   builtinBreak,
+		"continue": builtinContinue,
+		"return":  builtinReturn,
+		"read":    builtinRead,
+		"shift":   builtinShift,
+		"trap":    builtinTrap,
+		"fg":      builtinFg,
+		"bg":      builtinBg,
+		"wait":    builtinWait,
 	}
 }
 
-// ---- implementations ----
+// ---- cd, pwd ----
 
 func builtinCd(sh *Shell, args []string, _ io.Reader, _, stderr io.Writer) int {
 	var dir string
@@ -72,6 +83,8 @@ func builtinPwd(_ *Shell, _ []string, _ io.Reader, stdout, stderr io.Writer) int
 	return 0
 }
 
+// ---- echo, printf ----
+
 func builtinEcho(_ *Shell, args []string, _ io.Reader, stdout, _ io.Writer) int {
 	noNewline := false
 	start := 0
@@ -98,14 +111,14 @@ func builtinPrintf(_ *Shell, args []string, _ io.Reader, stdout, stderr io.Write
 	for i, a := range args[1:] {
 		fmtArgs[i] = a
 	}
-	// Replace shell-style %s with Go's — they are already compatible
-	// Handle \n \t escapes in format
 	format = strings.ReplaceAll(format, `\n`, "\n")
 	format = strings.ReplaceAll(format, `\t`, "\t")
 	format = strings.ReplaceAll(format, `\r`, "\r")
 	fmt.Fprintf(stdout, format, fmtArgs...)
 	return 0
 }
+
+// ---- exit ----
 
 func builtinExit(_ *Shell, args []string, _ io.Reader, _, _ io.Writer) int {
 	code := 0
@@ -119,16 +132,17 @@ func builtinExit(_ *Shell, args []string, _ io.Reader, _, _ io.Writer) int {
 	return code
 }
 
-func builtinExport(sh *Shell, args []string, _ io.Reader, _, stderr io.Writer) int {
+// ---- export, unset, env, set ----
+
+func builtinExport(sh *Shell, args []string, _ io.Reader, stdout, _ io.Writer) int {
 	if len(args) == 0 {
-		// print all exported vars
 		names := make([]string, 0, len(sh.exported))
 		for k := range sh.exported {
 			names = append(names, k)
 		}
 		sort.Strings(names)
 		for _, k := range names {
-			fmt.Fprintf(os.Stdout, "export %s=%q\n", k, sh.vars[k])
+			fmt.Fprintf(stdout, "export %s=%q\n", k, sh.vars[k])
 		}
 		return 0
 	}
@@ -178,7 +192,6 @@ func builtinSet(sh *Shell, args []string, _ io.Reader, stdout, _ io.Writer) int 
 		}
 		return 0
 	}
-	// VAR=val pairs
 	for _, a := range args {
 		idx := strings.IndexByte(a, '=')
 		if idx >= 0 {
@@ -187,6 +200,8 @@ func builtinSet(sh *Shell, args []string, _ io.Reader, stdout, _ io.Writer) int 
 	}
 	return 0
 }
+
+// ---- source ----
 
 func builtinSource(sh *Shell, args []string, _ io.Reader, _, stderr io.Writer) int {
 	if len(args) == 0 {
@@ -200,6 +215,8 @@ func builtinSource(sh *Shell, args []string, _ io.Reader, _, stderr io.Writer) i
 	}
 	return sh.EvalString(string(data))
 }
+
+// ---- alias, unalias ----
 
 func builtinAlias(sh *Shell, args []string, _ io.Reader, stdout, _ io.Writer) int {
 	if len(args) == 0 {
@@ -233,6 +250,8 @@ func builtinUnalias(sh *Shell, args []string, _ io.Reader, _, _ io.Writer) int {
 	return 0
 }
 
+// ---- history, type, help ----
+
 func builtinHistory(sh *Shell, _ []string, _ io.Reader, stdout, _ io.Writer) int {
 	for i, h := range sh.History {
 		fmt.Fprintf(stdout, "%5d  %s\n", i+1, h)
@@ -251,6 +270,10 @@ func builtinType(sh *Shell, args []string, _ io.Reader, stdout, stderr io.Writer
 			fmt.Fprintf(stdout, "%s is aliased to %q\n", name, v)
 			continue
 		}
+		if _, ok := sh.funcs[name]; ok {
+			fmt.Fprintf(stdout, "%s is a shell function\n", name)
+			continue
+		}
 		if path, found := lookupCommand(name); found {
 			fmt.Fprintf(stdout, "%s is %s\n", name, path)
 			continue
@@ -265,31 +288,418 @@ func builtinHelp(_ *Shell, _ []string, _ io.Reader, stdout, _ io.Writer) int {
 	fmt.Fprintln(stdout, `posh — Portable Shell
 
 Built-in commands:
-  cd [dir]          Change directory (default: $HOME)
-  pwd               Print working directory
-  echo [-n] [args]  Print arguments
-  printf fmt [args] Formatted output
+  cd [dir]            Change directory (default: $HOME)
+  pwd                 Print working directory
+  echo [-n] [args]    Print arguments
+  printf fmt [args]   Formatted output
   export [VAR[=val]]  Export variable to environment
-  unset VAR...      Remove variable
-  env               Print exported environment
-  set [VAR=val]...  Set or list shell variables
+  unset VAR...        Remove variable
+  env                 Print exported environment
+  set [VAR=val]...    Set or list shell variables
   source FILE / . FILE  Execute FILE in current shell
   alias [name[=val]]  Define or list aliases
-  unalias name...   Remove aliases
-  history           Show command history
-  type name...      Show type of name
-  jobs              List background jobs
-  true              Exit 0
-  false             Exit 1
-  :                 No-op (exit 0)
-  help              Show this help
-  exit [n]          Exit shell with status n`)
+  unalias name...     Remove aliases
+  history             Show command history
+  type name...        Show type of name
+  jobs                List background jobs
+  fg [%n]             Bring job to foreground
+  bg [%n]             Resume job in background
+  wait [%n|pid]       Wait for job/process
+  test EXPR / [ EXPR ] Evaluate conditional expression
+  break [n]           Break from n levels of loop
+  continue [n]        Continue next iteration of loop
+  return [n]          Return from function with exit code n
+  read [-r] [-p P] VAR...  Read a line from stdin
+  shift [n]           Shift positional parameters
+  trap [cmd] [SIG]    Set signal handler
+  true / false / :    Exit 0 / 1 / 0
+  help                Show this help
+  exit [n]            Exit shell
+
+Control flow:
+  if COND; then BODY; [elif COND; then BODY;]... [else BODY;] fi
+  for VAR [in WORDS]; do BODY; done
+  while COND; do BODY; done
+  until COND; do BODY; done
+  case WORD in PATTERN) BODY;; ... esac
+  NAME() { BODY }
+  function NAME { BODY }`)
 	return 0
 }
+
+// ---- jobs, fg, bg, wait ----
 
 func builtinJobs(sh *Shell, _ []string, _ io.Reader, stdout, _ io.Writer) int {
 	for _, j := range sh.jobs.list() {
 		fmt.Fprintf(stdout, "[%d] Running\t%s\n", j.ID, j.Desc)
+	}
+	return 0
+}
+
+func builtinFg(sh *Shell, args []string, _ io.Reader, _, stderr io.Writer) int {
+	jobs := sh.jobs.list()
+	if len(jobs) == 0 {
+		fmt.Fprintf(stderr, "%s: fg: no current job\n", sh.name)
+		return 1
+	}
+	j := jobs[len(jobs)-1]
+	if len(args) > 0 {
+		id := parseJobID(args[0])
+		for _, jj := range jobs {
+			if jj.ID == id {
+				j = jj
+				break
+			}
+		}
+	}
+	fmt.Fprintf(os.Stderr, "%s\n", j.Desc)
+	j.Cmd.Wait()
+	return 0
+}
+
+func builtinBg(sh *Shell, args []string, _ io.Reader, _, stderr io.Writer) int {
+	jobs := sh.jobs.list()
+	if len(jobs) == 0 {
+		fmt.Fprintf(stderr, "%s: bg: no current job\n", sh.name)
+		return 1
+	}
+	j := jobs[len(jobs)-1]
+	if len(args) > 0 {
+		id := parseJobID(args[0])
+		for _, jj := range jobs {
+			if jj.ID == id {
+				j = jj
+				break
+			}
+		}
+	}
+	fmt.Fprintf(os.Stderr, "[%d] %s &\n", j.ID, j.Desc)
+	return 0
+}
+
+func builtinWait(sh *Shell, args []string, _ io.Reader, _, _ io.Writer) int {
+	if len(args) == 0 {
+		for _, j := range sh.jobs.list() {
+			j.Cmd.Wait()
+		}
+		return 0
+	}
+	id := parseJobID(args[0])
+	for _, j := range sh.jobs.list() {
+		if j.ID == id {
+			j.Cmd.Wait()
+			return 0
+		}
+	}
+	return 0
+}
+
+func parseJobID(s string) int {
+	s = strings.TrimPrefix(s, "%")
+	n, _ := strconv.Atoi(s)
+	return n
+}
+
+// ---- control flow builtins ----
+
+func builtinBreak(_ *Shell, args []string, _ io.Reader, _, _ io.Writer) int {
+	n := 1
+	if len(args) > 0 {
+		if v, err := strconv.Atoi(args[0]); err == nil && v > 0 {
+			n = v
+		}
+	}
+	panic(loopBreak{n})
+}
+
+func builtinContinue(_ *Shell, args []string, _ io.Reader, _, _ io.Writer) int {
+	n := 1
+	if len(args) > 0 {
+		if v, err := strconv.Atoi(args[0]); err == nil && v > 0 {
+			n = v
+		}
+	}
+	panic(loopContinue{n})
+}
+
+func builtinReturn(sh *Shell, args []string, _ io.Reader, _, _ io.Writer) int {
+	code := sh.lastExit
+	if len(args) > 0 {
+		if v, err := strconv.Atoi(args[0]); err == nil {
+			code = v
+		}
+	}
+	panic(funcReturn{code})
+}
+
+// ---- read ----
+
+func builtinRead(sh *Shell, args []string, stdin io.Reader, stdout, _ io.Writer) int {
+	rawMode := false
+	prompt := ""
+	var varNames []string
+
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "-r":
+			rawMode = true
+		case "-p":
+			i++
+			if i < len(args) {
+				prompt = args[i]
+			}
+		default:
+			varNames = append(varNames, args[i])
+		}
+	}
+
+	if prompt != "" {
+		fmt.Fprint(stdout, prompt)
+	}
+
+	reader := bufio.NewReader(stdin)
+	line, err := reader.ReadString('\n')
+	if err != nil && len(line) == 0 {
+		return 1
+	}
+	line = strings.TrimRight(line, "\r\n")
+
+	if !rawMode {
+		// Handle backslash-newline continuation (shouldn't appear at this level but be safe)
+		line = strings.ReplaceAll(line, "\\\n", "")
+	}
+
+	if len(varNames) == 0 {
+		sh.setVar("REPLY", line)
+		return 0
+	}
+
+	ifs := sh.getVar("IFS")
+	if ifs == "" {
+		ifs = " \t"
+	}
+
+	parts := splitByIFS(line, ifs)
+	for i, name := range varNames {
+		if i < len(parts) {
+			if i == len(varNames)-1 {
+				// Last variable gets remaining parts joined
+				sh.setVar(name, strings.Join(parts[i:], " "))
+			} else {
+				sh.setVar(name, parts[i])
+			}
+		} else {
+			sh.setVar(name, "")
+		}
+	}
+	return 0
+}
+
+func splitByIFS(s, ifs string) []string {
+	var parts []string
+	start := -1
+	for i, ch := range s {
+		if strings.ContainsRune(ifs, ch) {
+			if start >= 0 {
+				parts = append(parts, s[start:i])
+				start = -1
+			}
+		} else {
+			if start < 0 {
+				start = i
+			}
+		}
+	}
+	if start >= 0 {
+		parts = append(parts, s[start:])
+	}
+	return parts
+}
+
+// ---- shift ----
+
+func builtinShift(sh *Shell, args []string, _ io.Reader, _, stderr io.Writer) int {
+	n := 1
+	if len(args) > 0 {
+		if v, err := strconv.Atoi(args[0]); err == nil {
+			n = v
+		}
+	}
+	if n > len(sh.posParams) {
+		n = len(sh.posParams)
+	}
+	sh.posParams = sh.posParams[n:]
+	return 0
+}
+
+// ---- trap ----
+
+func builtinTrap(sh *Shell, args []string, _ io.Reader, stdout, _ io.Writer) int {
+	if len(args) == 0 {
+		// List traps
+		sigs := make([]string, 0, len(sh.traps))
+		for k := range sh.traps {
+			sigs = append(sigs, k)
+		}
+		sort.Strings(sigs)
+		for _, sig := range sigs {
+			fmt.Fprintf(stdout, "trap -- %q %s\n", sh.traps[sig], sig)
+		}
+		return 0
+	}
+	if len(args) == 1 {
+		return 0
+	}
+	cmd := args[0]
+	for _, sig := range args[1:] {
+		sig = strings.ToUpper(sig)
+		if cmd == "-" {
+			delete(sh.traps, sig)
+		} else {
+			sh.traps[sig] = cmd
+		}
+	}
+	return 0
+}
+
+// ---- test / [ ----
+
+func builtinTest(_ *Shell, args []string, _ io.Reader, _, _ io.Writer) int {
+	result, _ := evalTest(args)
+	if result {
+		return 0
+	}
+	return 1
+}
+
+func builtinTestBracket(_ *Shell, args []string, _ io.Reader, _, stderr io.Writer) int {
+	if len(args) == 0 || args[len(args)-1] != "]" {
+		fmt.Fprintln(stderr, "[: missing ']'")
+		return 2
+	}
+	args = args[:len(args)-1]
+	result, _ := evalTest(args)
+	if result {
+		return 0
+	}
+	return 1
+}
+
+// evalTest evaluates POSIX test expressions.
+func evalTest(args []string) (bool, int) {
+	if len(args) == 0 {
+		return false, 0
+	}
+
+	// Logical not
+	if args[0] == "!" {
+		v, n := evalTest(args[1:])
+		return !v, n + 1
+	}
+
+	// Compound: -a and -o
+	// Find lowest-precedence -o first
+	for i := 1; i < len(args)-1; i++ {
+		if args[i] == "-o" {
+			left, _ := evalTest(args[:i])
+			right, _ := evalTest(args[i+1:])
+			return left || right, len(args)
+		}
+	}
+	for i := 1; i < len(args)-1; i++ {
+		if args[i] == "-a" {
+			left, _ := evalTest(args[:i])
+			right, _ := evalTest(args[i+1:])
+			return left && right, len(args)
+		}
+	}
+
+	// Unary tests
+	if len(args) == 2 {
+		op, arg := args[0], args[1]
+		switch op {
+		case "-z":
+			return len(arg) == 0, 2
+		case "-n":
+			return len(arg) != 0, 2
+		case "-f":
+			fi, err := os.Stat(arg)
+			return err == nil && fi.Mode().IsRegular(), 2
+		case "-d":
+			fi, err := os.Stat(arg)
+			return err == nil && fi.IsDir(), 2
+		case "-e":
+			_, err := os.Stat(arg)
+			return err == nil, 2
+		case "-r":
+			f, err := os.OpenFile(arg, os.O_RDONLY, 0)
+			if err != nil {
+				return false, 2
+			}
+			f.Close()
+			return true, 2
+		case "-w":
+			f, err := os.OpenFile(arg, os.O_WRONLY, 0)
+			if err != nil {
+				return false, 2
+			}
+			f.Close()
+			return true, 2
+		case "-x":
+			fi, err := os.Stat(arg)
+			return err == nil && !fi.IsDir(), 2 // Windows: any file is "executable"
+		case "-s":
+			fi, err := os.Stat(arg)
+			return err == nil && fi.Size() > 0, 2
+		case "-L", "-h":
+			fi, err := os.Lstat(arg)
+			return err == nil && fi.Mode()&os.ModeSymlink != 0, 2
+		}
+	}
+
+	// Binary tests
+	if len(args) == 3 {
+		left, op, right := args[0], args[1], args[2]
+		switch op {
+		case "=", "==":
+			return left == right, 3
+		case "!=":
+			return left != right, 3
+		case "<":
+			return left < right, 3
+		case ">":
+			return left > right, 3
+		case "-eq":
+			return cmpInt(left, right) == 0, 3
+		case "-ne":
+			return cmpInt(left, right) != 0, 3
+		case "-lt":
+			return cmpInt(left, right) < 0, 3
+		case "-le":
+			return cmpInt(left, right) <= 0, 3
+		case "-gt":
+			return cmpInt(left, right) > 0, 3
+		case "-ge":
+			return cmpInt(left, right) >= 0, 3
+		}
+	}
+
+	// Single string (non-empty = true)
+	if len(args) == 1 {
+		return len(args[0]) > 0, 1
+	}
+
+	return false, 0
+}
+
+func cmpInt(a, b string) int {
+	ia, _ := strconv.ParseInt(strings.TrimSpace(a), 10, 64)
+	ib, _ := strconv.ParseInt(strings.TrimSpace(b), 10, 64)
+	if ia < ib {
+		return -1
+	}
+	if ia > ib {
+		return 1
 	}
 	return 0
 }

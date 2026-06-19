@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 
 	"github.com/fermat-tech/posh/internal/lexer"
 	"github.com/fermat-tech/posh/internal/parser"
@@ -78,6 +79,9 @@ func applyRedirs(redirs []parser.Redir, stdin io.Reader, stdout, stderr io.Write
 			closers = append(closers, f)
 			stdout = f
 			stderr = f
+
+		case lexer.HEREDOC_OP:
+			stdin = strings.NewReader(r.File)
 		}
 	}
 

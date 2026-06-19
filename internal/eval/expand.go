@@ -11,16 +11,56 @@ import (
 )
 
 // expandWords expands a slice of raw word tokens into concrete argument strings.
-// Steps: tilde → variable → command-sub → arithmetic → glob → quote stripping.
+// Steps: tilde → variable → command-sub → arithmetic → word-split → glob → quote stripping.
 func (sh *Shell) expandWords(words []string) []string {
 	var result []string
 	for _, w := range words {
+		// Double-quoted strings are not word-split or glob-expanded
+		if strings.HasPrefix(w, `"`) && strings.HasSuffix(w, `"`) && len(w) >= 2 {
+			result = append(result, sh.expandWord(w))
+			continue
+		}
 		expanded := sh.expandWord(w)
-		// Glob expansion on unquoted words
-		globbed := sh.globExpand(expanded)
-		result = append(result, globbed...)
+		// Word splitting: split on IFS characters if expansion produced spaces/tabs
+		parts := sh.wordSplit(expanded)
+		for _, part := range parts {
+			result = append(result, sh.globExpand(part)...)
+		}
 	}
 	return result
+}
+
+// wordSplit splits a string on IFS characters.
+func (sh *Shell) wordSplit(s string) []string {
+	ifs := sh.getVar("IFS")
+	if ifs == "" {
+		ifs = " \t\n"
+	}
+	// If no IFS characters in s, return as-is
+	if !strings.ContainsAny(s, ifs) {
+		return []string{s}
+	}
+	var parts []string
+	start := -1
+	for i, ch := range s {
+		if strings.ContainsRune(ifs, ch) {
+			if start >= 0 {
+				parts = append(parts, s[start:i])
+				start = -1
+			}
+		} else {
+			if start < 0 {
+				start = i
+			}
+		}
+	}
+	if start >= 0 {
+		parts = append(parts, s[start:])
+	}
+	if len(parts) == 0 {
+		return nil
+	}
+	return parts
 }
 
 // expandWord performs tilde, variable, command-substitution, arithmetic expansion
@@ -145,6 +185,19 @@ func (sh *Shell) expandDollar(runes []rune, i int) (string, int) {
 
 	case '0':
 		return sh.name, 2
+
+	case '@', '*':
+		return strings.Join(sh.posParams, " "), 2
+
+	case '#':
+		return strconv.Itoa(len(sh.posParams)), 2
+
+	case '1', '2', '3', '4', '5', '6', '7', '8', '9':
+		idx := int(next-'1')
+		if idx < len(sh.posParams) {
+			return sh.posParams[idx], 2
+		}
+		return "", 2
 
 	default:
 		if unicode.IsLetter(next) || next == '_' {
@@ -290,14 +343,43 @@ func (sh *Shell) homeDir() string {
 
 func evalArith(sh *Shell, expr string) int64 {
 	expr = strings.TrimSpace(expr)
-	// Expand variables first
+	// Expand $VAR references first
 	expr = sh.expandUnquoted(expr)
+	// Expand remaining bare variable names (e.g. i in $((i+1)))
+	expr = expandBareArithVars(sh, expr)
 	val, err := parseArithExpr(expr)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "posh: arithmetic: %v\n", err)
 		return 0
 	}
 	return val
+}
+
+// expandBareArithVars replaces bare identifier names with their numeric shell variable values.
+func expandBareArithVars(sh *Shell, expr string) string {
+	var sb strings.Builder
+	runes := []rune(expr)
+	i := 0
+	for i < len(runes) {
+		ch := runes[i]
+		if unicode.IsLetter(ch) || ch == '_' {
+			j := i
+			for j < len(runes) && (unicode.IsLetter(runes[j]) || unicode.IsDigit(runes[j]) || runes[j] == '_') {
+				j++
+			}
+			name := string(runes[i:j])
+			val := sh.getVar(name)
+			if val == "" {
+				val = "0"
+			}
+			sb.WriteString(val)
+			i = j
+		} else {
+			sb.WriteRune(ch)
+			i++
+		}
+	}
+	return sb.String()
 }
 
 func parseArithExpr(s string) (int64, error) {

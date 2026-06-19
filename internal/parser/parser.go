@@ -1,10 +1,15 @@
 package parser
 
 import (
+	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/fermat-tech/posh/internal/lexer"
 )
+
+// ErrIncomplete is returned when the input ends before a compound command is closed.
+var ErrIncomplete = errors.New("incomplete input")
 
 // ParseError carries a human-readable parse error message.
 type ParseError struct {
@@ -17,14 +22,15 @@ func (e *ParseError) Error() string { return e.Msg }
 type Parser struct {
 	tokens []lexer.Token
 	pos    int
+	stops  map[string]bool // current reserved-word stop set
 }
 
 // New creates a Parser from a pre-tokenized slice.
 func New(tokens []lexer.Token) *Parser {
-	return &Parser{tokens: tokens}
+	return &Parser{tokens: tokens, stops: map[string]bool{}}
 }
 
-// Parse parses a complete input line and returns a *List (or nil for empty input).
+// Parse parses a complete input string and returns a Node (or nil for empty input).
 func Parse(input string) (Node, error) {
 	l := lexer.New(input)
 	toks := l.Tokenize()
@@ -32,23 +38,61 @@ func Parse(input string) (Node, error) {
 	return p.parseList()
 }
 
+// ---- stop-word helpers ----
+
+func (p *Parser) pushStops(words ...string) map[string]bool {
+	old := p.stops
+	next := make(map[string]bool, len(old)+len(words))
+	for k, v := range old {
+		next[k] = v
+	}
+	for _, w := range words {
+		next[w] = true
+	}
+	p.stops = next
+	return old
+}
+
+func (p *Parser) popStops(old map[string]bool) {
+	p.stops = old
+}
+
+func (p *Parser) isStop(t lexer.Token) bool {
+	return t.Type == lexer.WORD && p.stops[t.Val]
+}
+
 // ---- token helpers ----
 
+// peek returns the next non-newline token without advancing.
 func (p *Parser) peek() lexer.Token {
-	for p.pos < len(p.tokens) {
-		t := p.tokens[p.pos]
-		if t.Type == lexer.NEWLINE {
-			p.pos++
-			continue
+	for pos := p.pos; pos < len(p.tokens); pos++ {
+		t := p.tokens[pos]
+		if t.Type != lexer.NEWLINE {
+			return t
 		}
-		return t
 	}
 	return lexer.Token{Type: lexer.EOF}
 }
 
+// peekRaw returns the next token including newlines.
 func (p *Parser) peekRaw() lexer.Token {
 	if p.pos < len(p.tokens) {
 		return p.tokens[p.pos]
+	}
+	return lexer.Token{Type: lexer.EOF}
+}
+
+// peekNth returns the nth non-newline token (0 = same as peek).
+func (p *Parser) peekNth(n int) lexer.Token {
+	count := 0
+	for pos := p.pos; pos < len(p.tokens); pos++ {
+		if p.tokens[pos].Type == lexer.NEWLINE {
+			continue
+		}
+		if count == n {
+			return p.tokens[pos]
+		}
+		count++
 	}
 	return lexer.Token{Type: lexer.EOF}
 }
@@ -59,37 +103,52 @@ func (p *Parser) consume() lexer.Token {
 	return t
 }
 
-func (p *Parser) expect(tt lexer.TokenType) (lexer.Token, error) {
-	t := p.peek()
-	if t.Type != tt {
-		return t, &ParseError{fmt.Sprintf("expected %s, got %s %q", tt, t.Type, t.Val)}
-	}
-	p.consume()
-	return t, nil
+// consumeNonNL advances past any newlines then consumes one token.
+func (p *Parser) consumeNonNL() lexer.Token {
+	p.skipNewlines()
+	return p.consume()
 }
 
-// skipNewlines advances past NEWLINE tokens.
 func (p *Parser) skipNewlines() {
 	for p.pos < len(p.tokens) && p.tokens[p.pos].Type == lexer.NEWLINE {
 		p.pos++
 	}
 }
 
-// ---- grammar ----
-//
-// list     ::= pipeline { (';'|'&&'|'||'|'&') pipeline }
-// pipeline ::= ['!'] simple_cmd { '|' simple_cmd }
-// simple_cmd ::= { ASSIGN } WORD { WORD | redir }
-// redir    ::= ('>'|'>>'|'<'|'2>'|'2>>'|'&>') WORD
+func (p *Parser) nextWordIs(w string) bool {
+	t := p.peek()
+	return t.Type == lexer.WORD && t.Val == w
+}
 
-func (p *Parser) parseList() (Node, error) {
+func (p *Parser) consumeWord(w string) error {
 	p.skipNewlines()
 	t := p.peek()
 	if t.Type == lexer.EOF {
+		return ErrIncomplete
+	}
+	if t.Type != lexer.WORD || t.Val != w {
+		return &ParseError{fmt.Sprintf("expected %q, got %q", w, t.Val)}
+	}
+	p.consumeNonNL()
+	return nil
+}
+
+// ---- grammar ----
+
+// isListEnd returns true for tokens that naturally terminate a list.
+func (p *Parser) isListEnd(t lexer.Token) bool {
+	return t.Type == lexer.EOF || t.Type == lexer.RPAREN || t.Type == lexer.RBRACE || p.isStop(t)
+}
+
+// parseList is the top-level list parser; stops at EOF, RPAREN, RBRACE, or stop words.
+func (p *Parser) parseList() (Node, error) {
+	p.skipNewlines()
+	t := p.peek()
+	if p.isListEnd(t) {
 		return nil, nil
 	}
 
-	first, err := p.parsePipelineOrSubshell()
+	first, err := p.parseCommandNode()
 	if err != nil {
 		return nil, err
 	}
@@ -119,62 +178,484 @@ func (p *Parser) parseList() (Node, error) {
 			p.consume()
 			op = OpSemi
 		default:
-			// End of list
 			if len(list.Elems) == 0 {
-				return list.First, nil // single node, no wrapping needed
+				return list.First, nil
 			}
 			return list, nil
 		}
 
 		p.skipNewlines()
 		t = p.peek()
-		if t.Type == lexer.EOF || t.Type == lexer.RPAREN {
-			// Trailing operator — fine (e.g. "cmd &")
+		if p.isListEnd(t) {
 			list.Elems = append(list.Elems, ListElem{Op: op, Node: nil})
 			return list, nil
 		}
 
-		next, err := p.parsePipelineOrSubshell()
+		next, err := p.parseCommandNode()
 		if err != nil {
 			return nil, err
+		}
+		if next == nil {
+			return list, nil
 		}
 		list.Elems = append(list.Elems, ListElem{Op: op, Node: next})
 	}
 }
 
-func (p *Parser) parsePipelineOrSubshell() (Node, error) {
+// parseCommandNode dispatches to compound commands, subshells, group commands, or pipelines.
+// It never returns a typed nil — callers can safely compare the result to nil.
+func (p *Parser) parseCommandNode() (Node, error) {
 	t := p.peek()
+
+	// Natural terminators
+	if p.isListEnd(t) {
+		return nil, nil
+	}
+
+	// Group command { list; }
+	if t.Type == lexer.LBRACE {
+		return p.parseGroupCmd()
+	}
+
+	// Subshell ( list )
 	if t.Type == lexer.LPAREN {
 		return p.parseSubshell()
 	}
-	return p.parsePipeline()
+
+	// Compound commands and function definitions
+	if t.Type == lexer.WORD {
+		// Function definition: NAME () { ... }
+		t1 := p.peekNth(1)
+		t2 := p.peekNth(2)
+		if t1.Type == lexer.LPAREN && t2.Type == lexer.RPAREN {
+			return p.parseFuncDefShort()
+		}
+
+		switch t.Val {
+		case "if":
+			return p.parseIfCmd()
+		case "for":
+			return p.parseForCmd()
+		case "while":
+			return p.parseWhileCmd(false)
+		case "until":
+			return p.parseWhileCmd(true)
+		case "case":
+			return p.parseCaseCmd()
+		case "function":
+			return p.parseFuncDefKeyword()
+		}
+	}
+
+	// Fallthrough to pipeline; convert typed nil to untyped nil
+	pipe, err := p.parsePipeline()
+	if pipe == nil {
+		return nil, err
+	}
+	return pipe, err
 }
 
-func (p *Parser) parseSubshell() (*Subshell, error) {
-	p.consume() // (
+// ---- compound command parsers ----
+
+func (p *Parser) parseGroupCmd() (*GroupCmd, error) {
+	p.consumeNonNL() // consume {
+	// No need to pushStops("}"): RBRACE is handled by isListEnd in parseList.
 	body, err := p.parseList()
 	if err != nil {
 		return nil, err
 	}
-	if _, err := p.expect(lexer.RPAREN); err != nil {
-		return nil, err
+	p.skipNewlines()
+	t := p.peek()
+	if t.Type == lexer.EOF {
+		return nil, ErrIncomplete
 	}
-	var list *List
+	if t.Type != lexer.RBRACE {
+		return nil, &ParseError{fmt.Sprintf("expected '}', got %q", t.Val)}
+	}
+	p.consumeNonNL()
+
+	var bodyList *List
 	if body != nil {
 		switch v := body.(type) {
 		case *List:
-			list = v
+			bodyList = v
 		default:
-			list = &List{First: body}
+			bodyList = &List{First: body}
 		}
 	}
-	return &Subshell{Body: list}, nil
+	cmd := &GroupCmd{Body: bodyList}
+	cmd.Redirs = p.parseRedirs()
+	return cmd, nil
 }
+
+func (p *Parser) parseSubshell() (*Subshell, error) {
+	p.consumeNonNL() // (
+	body, err := p.parseList()
+	if err != nil {
+		return nil, err
+	}
+	p.skipNewlines()
+	t := p.peek()
+	if t.Type == lexer.EOF {
+		return nil, ErrIncomplete
+	}
+	if t.Type != lexer.RPAREN {
+		return nil, &ParseError{fmt.Sprintf("expected ')', got %q", t.Val)}
+	}
+	p.consumeNonNL()
+
+	var bodyList *List
+	if body != nil {
+		switch v := body.(type) {
+		case *List:
+			bodyList = v
+		default:
+			bodyList = &List{First: body}
+		}
+	}
+	sub := &Subshell{Body: bodyList}
+	sub.Redirs = p.parseRedirs()
+	return sub, nil
+}
+
+func (p *Parser) parseIfCmd() (*IfCmd, error) {
+	p.consumeNonNL() // consume 'if'
+
+	// condition
+	old := p.pushStops("then", "fi", "elif", "else")
+	cond, err := p.parseList()
+	p.popStops(old)
+	if err != nil {
+		return nil, err
+	}
+	if err := p.consumeWord("then"); err != nil {
+		return nil, err
+	}
+
+	// then body
+	old = p.pushStops("fi", "elif", "else")
+	then, err := p.parseList()
+	p.popStops(old)
+	if err != nil {
+		return nil, err
+	}
+
+	cmd := &IfCmd{Cond: toList(cond), Then: toList(then)}
+
+	// elif / else / fi
+	for {
+		p.skipNewlines()
+		t := p.peek()
+		if t.Type == lexer.EOF {
+			return nil, ErrIncomplete
+		}
+		switch {
+		case t.Type == lexer.WORD && t.Val == "elif":
+			p.consumeNonNL()
+			old = p.pushStops("then", "fi", "elif", "else")
+			econd, err := p.parseList()
+			p.popStops(old)
+			if err != nil {
+				return nil, err
+			}
+			if err := p.consumeWord("then"); err != nil {
+				return nil, err
+			}
+			old = p.pushStops("fi", "elif", "else")
+			ebody, err := p.parseList()
+			p.popStops(old)
+			if err != nil {
+				return nil, err
+			}
+			cmd.Elifs = append(cmd.Elifs, ElifClause{Cond: toList(econd), Then: toList(ebody)})
+
+		case t.Type == lexer.WORD && t.Val == "else":
+			p.consumeNonNL()
+			old = p.pushStops("fi")
+			ebody, err := p.parseList()
+			p.popStops(old)
+			if err != nil {
+				return nil, err
+			}
+			cmd.Else = toList(ebody)
+			if err := p.consumeWord("fi"); err != nil {
+				return nil, err
+			}
+			cmd.Redirs = p.parseRedirs()
+			return cmd, nil
+
+		case t.Type == lexer.WORD && t.Val == "fi":
+			p.consumeNonNL()
+			cmd.Redirs = p.parseRedirs()
+			return cmd, nil
+
+		default:
+			return nil, &ParseError{fmt.Sprintf("expected 'fi', 'elif', or 'else'; got %q", t.Val)}
+		}
+	}
+}
+
+func (p *Parser) parseForCmd() (*ForCmd, error) {
+	p.consumeNonNL() // consume 'for'
+
+	t := p.peek()
+	if t.Type != lexer.WORD {
+		return nil, &ParseError{"expected variable name after 'for'"}
+	}
+	varName := t.Val
+	p.consumeNonNL()
+
+	cmd := &ForCmd{Var: varName}
+
+	// optional 'in words...'
+	p.skipNewlines()
+	if p.nextWordIs("in") {
+		p.consumeNonNL()
+		// collect words until ; or newline or 'do'
+		for {
+			t = p.peek()
+			if t.Type == lexer.EOF || t.Type == lexer.SEMI || t.Type == lexer.NEWLINE ||
+				(t.Type == lexer.WORD && t.Val == "do") {
+				break
+			}
+			t = p.consumeNonNL()
+			cmd.Words = append(cmd.Words, t.Val)
+		}
+	}
+
+	// skip ; or newline before 'do'
+	for {
+		t = p.peekRaw()
+		if t.Type == lexer.SEMI || t.Type == lexer.NEWLINE {
+			p.consume()
+		} else {
+			break
+		}
+	}
+
+	if err := p.consumeWord("do"); err != nil {
+		return nil, err
+	}
+
+	old := p.pushStops("done")
+	body, err := p.parseList()
+	p.popStops(old)
+	if err != nil {
+		return nil, err
+	}
+	if err := p.consumeWord("done"); err != nil {
+		return nil, err
+	}
+
+	cmd.Body = toList(body)
+	cmd.Redirs = p.parseRedirs()
+	return cmd, nil
+}
+
+func (p *Parser) parseWhileCmd(until bool) (*WhileCmd, error) {
+	p.consumeNonNL() // consume 'while' or 'until'
+
+	old := p.pushStops("do")
+	cond, err := p.parseList()
+	p.popStops(old)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := p.consumeWord("do"); err != nil {
+		return nil, err
+	}
+
+	old = p.pushStops("done")
+	body, err := p.parseList()
+	p.popStops(old)
+	if err != nil {
+		return nil, err
+	}
+	if err := p.consumeWord("done"); err != nil {
+		return nil, err
+	}
+
+	cmd := &WhileCmd{Cond: toList(cond), Body: toList(body), Until: until}
+	cmd.Redirs = p.parseRedirs()
+	return cmd, nil
+}
+
+func (p *Parser) parseCaseCmd() (*CaseCmd, error) {
+	p.consumeNonNL() // consume 'case'
+
+	t := p.peek()
+	if t.Type == lexer.EOF {
+		return nil, ErrIncomplete
+	}
+	wordTok := p.consumeNonNL()
+
+	if err := p.consumeWord("in"); err != nil {
+		return nil, err
+	}
+	p.skipNewlines()
+
+	cmd := &CaseCmd{Word: wordTok.Val}
+
+	for {
+		p.skipNewlines()
+		t = p.peek()
+		if t.Type == lexer.EOF {
+			return nil, ErrIncomplete
+		}
+		if t.Type == lexer.WORD && t.Val == "esac" {
+			p.consumeNonNL()
+			break
+		}
+
+		// Optional leading (
+		if t.Type == lexer.LPAREN {
+			p.consumeNonNL()
+		}
+
+		// Collect patterns separated by |
+		var patterns []string
+		for {
+			t = p.peek()
+			if t.Type == lexer.EOF {
+				return nil, ErrIncomplete
+			}
+			if t.Type == lexer.RPAREN {
+				p.consumeNonNL()
+				break
+			}
+			patterns = append(patterns, p.consumeNonNL().Val)
+			t = p.peek()
+			if t.Type == lexer.PIPE {
+				p.consumeNonNL()
+			}
+		}
+
+		// Parse clause body until ;; or esac
+		old := p.pushStops("esac")
+		var clauses []Node
+		for {
+			p.skipNewlines()
+			t = p.peek()
+			if t.Type == lexer.EOF {
+				p.popStops(old)
+				return nil, ErrIncomplete
+			}
+			if t.Type == lexer.WORD && t.Val == "esac" {
+				break
+			}
+			// ;; terminates the clause
+			if t.Type == lexer.SEMI {
+				// peek next
+				p.consume()
+				next := p.peekRaw()
+				if next.Type == lexer.SEMI {
+					p.consume()
+					break
+				}
+				// single ; — continue
+				continue
+			}
+			node, err := p.parseCommandNode()
+			if err != nil {
+				p.popStops(old)
+				return nil, err
+			}
+			if node != nil {
+				clauses = append(clauses, node)
+			}
+		}
+		p.popStops(old)
+
+		var bodyList *List
+		if len(clauses) > 0 {
+			bodyList = &List{First: clauses[0]}
+			for _, c := range clauses[1:] {
+				bodyList.Elems = append(bodyList.Elems, ListElem{Op: OpSemi, Node: c})
+			}
+		}
+		cmd.Clauses = append(cmd.Clauses, CaseClause{Patterns: patterns, Body: bodyList})
+	}
+
+	cmd.Redirs = p.parseRedirs()
+	return cmd, nil
+}
+
+func (p *Parser) parseFuncDefShort() (*FuncDef, error) {
+	name := p.consumeNonNL().Val // NAME
+	p.consumeNonNL()              // (
+	p.consumeNonNL()              // )
+	p.skipNewlines()
+
+	body, err := p.parseFuncBody()
+	if err != nil {
+		return nil, err
+	}
+	return &FuncDef{Name: name, Body: body}, nil
+}
+
+func (p *Parser) parseFuncDefKeyword() (*FuncDef, error) {
+	p.consumeNonNL() // consume 'function'
+
+	t := p.peek()
+	if t.Type != lexer.WORD {
+		return nil, &ParseError{"expected function name after 'function'"}
+	}
+	name := t.Val
+	p.consumeNonNL()
+
+	// optional ()
+	p.skipNewlines()
+	if p.peek().Type == lexer.LPAREN {
+		p.consumeNonNL() // (
+		if p.peek().Type != lexer.RPAREN {
+			return nil, &ParseError{"expected ')' after '('"}
+		}
+		p.consumeNonNL() // )
+	}
+	p.skipNewlines()
+
+	body, err := p.parseFuncBody()
+	if err != nil {
+		return nil, err
+	}
+	return &FuncDef{Name: name, Body: body}, nil
+}
+
+// parseFuncBody parses the function body (a compound command or group).
+func (p *Parser) parseFuncBody() (Node, error) {
+	t := p.peek()
+	switch t.Type {
+	case lexer.LBRACE:
+		return p.parseGroupCmd()
+	case lexer.LPAREN:
+		return p.parseSubshell()
+	case lexer.WORD:
+		switch t.Val {
+		case "if":
+			return p.parseIfCmd()
+		case "for":
+			return p.parseForCmd()
+		case "while":
+			return p.parseWhileCmd(false)
+		case "until":
+			return p.parseWhileCmd(true)
+		case "case":
+			return p.parseCaseCmd()
+		}
+	}
+	if t.Type == lexer.EOF {
+		return nil, ErrIncomplete
+	}
+	return nil, &ParseError{fmt.Sprintf("expected function body, got %q", t.Val)}
+}
+
+// ---- pipeline parser ----
 
 func (p *Parser) parsePipeline() (*Pipeline, error) {
 	negate := false
 	if t := p.peek(); t.Type == lexer.WORD && t.Val == "!" {
-		p.consume()
+		p.consumeNonNL()
 		negate = true
 	}
 
@@ -186,12 +667,13 @@ func (p *Parser) parsePipeline() (*Pipeline, error) {
 		return nil, nil
 	}
 
-	pipe := &Pipeline{Cmds: []*SimpleCmd{cmd}, Negate: negate}
+	pipe := &Pipeline{Cmds: []Node{cmd}, Negate: negate}
 
 	for p.peek().Type == lexer.PIPE {
-		p.consume() // |
+		p.consumeNonNL()
 		p.skipNewlines()
-		next, err := p.parseSimpleCmd()
+		// After | we may have a compound command
+		next, err := p.parseCommandNode()
 		if err != nil {
 			return nil, err
 		}
@@ -205,32 +687,56 @@ func (p *Parser) parsePipeline() (*Pipeline, error) {
 }
 
 func (p *Parser) parseSimpleCmd() (*SimpleCmd, error) {
+	// Bail on stop words
+	t := p.peek()
+	if t.Type == lexer.WORD && p.stops[t.Val] {
+		return nil, nil
+	}
+
 	cmd := &SimpleCmd{}
 
 	// Collect leading VAR=val assignments
 	for p.peek().Type == lexer.ASSIGN {
-		t := p.consume()
+		t = p.consume()
 		cmd.Assigns = append(cmd.Assigns, t.Val)
 	}
 
 	// Collect words and redirections
 	for {
-		t := p.peek()
+		t = p.peek()
+		if t.Type == lexer.WORD && p.stops[t.Val] {
+			break
+		}
 		switch t.Type {
 		case lexer.WORD:
-			p.consume()
+			p.consumeNonNL()
 			cmd.Words = append(cmd.Words, t.Val)
 
 		case lexer.REDIR_OUT, lexer.REDIR_APPEND, lexer.REDIR_IN,
 			lexer.REDIR_ERR, lexer.REDIR_ERR_APPEND, lexer.REDIR_BOTH:
 			op := t.Type
-			p.consume()
+			p.consumeNonNL()
 			file := p.peek()
 			if file.Type != lexer.WORD {
 				return nil, &ParseError{fmt.Sprintf("expected filename after %s", op)}
 			}
-			p.consume()
+			p.consumeNonNL()
 			cmd.Redirs = append(cmd.Redirs, Redir{Op: op, File: file.Val})
+
+		case lexer.HEREDOC_OP, lexer.HEREDOC_STRIP_OP:
+			strip := t.Type == lexer.HEREDOC_STRIP_OP
+			p.consumeNonNL()
+			delim := p.peek()
+			if delim.Type != lexer.WORD {
+				return nil, &ParseError{"expected heredoc delimiter"}
+			}
+			p.consumeNonNL()
+			// Content is stored in File field; the REPL/EvalString preprocesses heredocs
+			cmd.Redirs = append(cmd.Redirs, Redir{
+				Op:    lexer.HEREDOC_OP,
+				Delim: delim.Val,
+				Strip: strip,
+			})
 
 		default:
 			goto done
@@ -238,8 +744,89 @@ func (p *Parser) parseSimpleCmd() (*SimpleCmd, error) {
 	}
 
 done:
-	if len(cmd.Assigns) == 0 && len(cmd.Words) == 0 {
+	if len(cmd.Assigns) == 0 && len(cmd.Words) == 0 && len(cmd.Redirs) == 0 {
 		return nil, nil
 	}
 	return cmd, nil
+}
+
+// parseRedirs reads any trailing redirections after a compound command.
+func (p *Parser) parseRedirs() []Redir {
+	var redirs []Redir
+	for {
+		t := p.peek()
+		switch t.Type {
+		case lexer.REDIR_OUT, lexer.REDIR_APPEND, lexer.REDIR_IN,
+			lexer.REDIR_ERR, lexer.REDIR_ERR_APPEND, lexer.REDIR_BOTH:
+			op := t.Type
+			p.consumeNonNL()
+			file := p.peek()
+			if file.Type == lexer.WORD {
+				p.consumeNonNL()
+				redirs = append(redirs, Redir{Op: op, File: file.Val})
+			}
+		default:
+			return redirs
+		}
+	}
+}
+
+// ---- helpers ----
+
+func toList(n Node) *List {
+	if n == nil {
+		return nil
+	}
+	if l, ok := n.(*List); ok {
+		return l
+	}
+	return &List{First: n}
+}
+
+// NeedsContinuation reports whether the input string looks incomplete.
+// Used by the REPL to decide whether to prompt for more input.
+func NeedsContinuation(input string) bool {
+	// Trailing operators
+	trimmed := strings.TrimRight(input, " \t\r\n")
+	if strings.HasSuffix(trimmed, "|") ||
+		strings.HasSuffix(trimmed, "&&") ||
+		strings.HasSuffix(trimmed, "||") ||
+		strings.HasSuffix(trimmed, "\\") {
+		return true
+	}
+
+	// Count keyword nesting using the lexer
+	toks := lexer.New(input).Tokenize()
+	depth := 0
+	for _, t := range toks {
+		if t.Type != lexer.WORD {
+			continue
+		}
+		switch t.Val {
+		case "if", "for", "while", "until", "case":
+			depth++
+		case "fi", "done", "esac":
+			depth--
+		}
+	}
+	if depth > 0 {
+		return true
+	}
+
+	// Unmatched { or (
+	braceDepth := 0
+	parenDepth := 0
+	for _, t := range toks {
+		switch t.Type {
+		case lexer.LBRACE:
+			braceDepth++
+		case lexer.RBRACE:
+			braceDepth--
+		case lexer.LPAREN:
+			parenDepth++
+		case lexer.RPAREN:
+			parenDepth--
+		}
+	}
+	return braceDepth > 0 || parenDepth > 0
 }
