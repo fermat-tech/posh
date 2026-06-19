@@ -148,24 +148,38 @@ func (sh *Shell) EvalString(s string) int {
 }
 
 func (sh *Shell) evalList(list *parser.List) int {
-	code := sh.evalNode(list.First, false)
-	for _, elem := range list.Elems {
+	// ampAt reports whether the separator at index i is &, meaning the node
+	// immediately before it should run in the background.
+	ampAt := func(i int) bool {
+		return i < len(list.Elems) && list.Elems[i].Op == parser.OpAmp
+	}
+
+	// list.First runs in background when the first separator is &.
+	bg := ampAt(0)
+	code := sh.evalNode(list.First, bg)
+	if bg {
+		code = 0
+	}
+
+	for i, elem := range list.Elems {
 		if elem.Node == nil {
 			continue
 		}
+		// elem.Node runs in background when the *next* separator is &.
+		bg = ampAt(i + 1)
 		switch elem.Op {
-		case parser.OpSemi:
-			code = sh.evalNode(elem.Node, false)
+		case parser.OpSemi, parser.OpAmp:
+			code = sh.evalNode(elem.Node, bg)
 		case parser.OpAnd:
 			if code == 0 {
-				code = sh.evalNode(elem.Node, false)
+				code = sh.evalNode(elem.Node, bg)
 			}
 		case parser.OpOr:
 			if code != 0 {
-				code = sh.evalNode(elem.Node, false)
+				code = sh.evalNode(elem.Node, bg)
 			}
-		case parser.OpAmp:
-			sh.evalNode(elem.Node, true)
+		}
+		if bg {
 			code = 0
 		}
 	}
