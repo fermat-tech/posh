@@ -605,9 +605,14 @@ func builtinKill(sh *Shell, args []string, _ io.Reader, stdout, stderr io.Writer
 			for _, j := range sh.jobs.list() {
 				if j.ID == id {
 					found = true
-					if err := j.Cmd.Process.Signal(sig); err != nil {
-						fmt.Fprintf(stderr, "%s: kill: %%%d: %v\n", sh.name, id, err)
-						code = 1
+					// Kill the entire process tree so grandchild processes
+					// (e.g. sleep inside a posh -c "..." job) are also terminated.
+					if err := killProcessTree(j.Cmd.Process.Pid); err != nil {
+						// Fall back to a direct signal if taskkill is unavailable.
+						if serr := j.Cmd.Process.Signal(sig); serr != nil {
+							fmt.Fprintf(stderr, "%s: kill: %%%d: %v\n", sh.name, id, serr)
+							code = 1
+						}
 					}
 					break
 				}

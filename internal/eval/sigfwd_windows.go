@@ -4,6 +4,7 @@ package eval
 
 import (
 	"os/exec"
+	"strconv"
 	"syscall"
 )
 
@@ -27,4 +28,12 @@ func setForegroundAttrs(c *exec.Cmd) {
 // CTRL_BREAK_EVENT can, and causes the same default action (termination).
 func sendInterrupt(pid int) {
 	procGenerateConsoleCtrlEvent.Call(ctrlBreakEvent, uintptr(pid))
+}
+
+// killProcessTree kills a process and all its descendants using taskkill /F /T.
+// On Windows, killing a parent does not automatically kill its children, so
+// grandchild processes (e.g. sleep inside a posh -c "..." job) would otherwise
+// survive and keep I/O handles open, blocking cmd.Wait().
+func killProcessTree(pid int) error {
+	return exec.Command("taskkill", "/F", "/T", "/PID", strconv.Itoa(pid)).Run()
 }

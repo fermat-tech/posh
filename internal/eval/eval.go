@@ -612,6 +612,14 @@ func (sh *Shell) evalSimpleCmd(cmd *parser.SimpleCmd, stdin io.Reader, stdout, s
 			c.Stdin = devNull
 			defer devNull.Close()
 		}
+		// Use raw OS file handles for stdout/stderr.  If we leave a wrapped
+		// writer (e.g. colorable) Go's exec creates internal copy goroutines,
+		// and cmd.Wait() blocks until every process holding the write-end of
+		// that pipe closes it — including orphaned grandchildren.  With a real
+		// *os.File the handle is inherited directly and Wait() unblocks as
+		// soon as the tracked process exits.
+		c.Stdout = os.Stdout
+		c.Stderr = os.Stderr
 		if err := c.Start(); err != nil {
 			fmt.Fprintf(rStderr, "%s: %v\n", sh.name, err)
 			return 1
