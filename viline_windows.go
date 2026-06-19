@@ -69,7 +69,8 @@ func consoleRawMode() (restore func(), err error) {
 	}
 
 	// Clear processed input so Ctrl+C arrives as a KEY_EVENT instead of SIGINT.
-	newIn := (oldIn &^ (enableProcessedInput | enableLineInput | enableEchoInput | enableInsertMode | enableQuickEditMode)) | enableExtendedFlags
+	// Keep ENABLE_QUICK_EDIT_MODE so SHIFT+right-click text selection still works.
+	newIn := (oldIn &^ (enableProcessedInput | enableLineInput | enableEchoInput | enableInsertMode)) | enableExtendedFlags
 	r, _, e = procSetConsoleMode.Call(uintptr(stdin), uintptr(newIn))
 	if r == 0 {
 		return nil, e

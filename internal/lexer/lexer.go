@@ -96,6 +96,8 @@ type Lexer struct {
 
 // New creates a Lexer for the given input string.
 func New(input string) *Lexer {
+	// Strip UTF-8 BOM so files saved by Windows Notepad / PowerShell don't break.
+	input = strings.TrimPrefix(input, "\xef\xbb\xbf")
 	return &Lexer{input: []rune(input)}
 }
 
@@ -305,6 +307,12 @@ func isAssignment(s string) bool {
 	return true
 }
 
+// protectedSpace / protectedTab are Private Use Area sentinels placed around
+// whitespace inside single-quoted strings so word splitting in the evaluator
+// doesn't break them apart. The evaluator strips them after splitting.
+const protectedSpace rune = 0xE001
+const protectedTab   rune = 0xE002
+
 func (l *Lexer) readWord() string {
 	var sb strings.Builder
 	for {
@@ -318,7 +326,17 @@ func (l *Lexer) readWord() string {
 		switch ch {
 		case '\'':
 			l.advance()
-			sb.WriteString(l.readSingleQuoted())
+			// Protect whitespace so word splitting in the evaluator leaves it intact.
+			for _, ch := range l.readSingleQuoted() {
+				switch ch {
+				case ' ':
+					sb.WriteRune(protectedSpace)
+				case '\t':
+					sb.WriteRune(protectedTab)
+				default:
+					sb.WriteRune(ch)
+				}
+			}
 		case '"':
 			l.advance()
 			sb.WriteString(l.readDoubleQuoted())
@@ -333,7 +351,14 @@ func (l *Lexer) readWord() string {
 				l.advance() // line continuation
 			} else {
 				l.advance()
-				sb.WriteRune(next)
+				switch next {
+				case ' ':
+					sb.WriteRune(protectedSpace)
+				case '\t':
+					sb.WriteRune(protectedTab)
+				default:
+					sb.WriteRune(next)
+				}
 			}
 		case '$':
 			l.advance()

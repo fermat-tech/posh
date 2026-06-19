@@ -371,8 +371,12 @@ func builtinAlias(sh *Shell, args []string, _ io.Reader, stdout, _ io.Writer) in
 	return 0
 }
 
-func builtinUnalias(sh *Shell, args []string, _ io.Reader, _, _ io.Writer) int {
+func builtinUnalias(sh *Shell, args []string, _ io.Reader, _, stderr io.Writer) int {
 	for _, a := range args {
+		if a == "-a" {
+			sh.aliases = make(map[string]string)
+			continue
+		}
 		delete(sh.aliases, a)
 	}
 	return 0

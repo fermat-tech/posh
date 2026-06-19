@@ -73,6 +73,9 @@ type viState struct {
 	yank           []rune
 	prompt         string
 	lastDisplayLen int // visible columns written in previous redraw (for erase-to-end)
+	lastFChar      rune
+	lastFForward   bool // true = f (forward), false = F (backward)
+	lastFSet       bool
 }
 
 // viReadLine reads one line using the vi-mode editor.
@@ -360,10 +363,52 @@ func (vs *viState) handleNormalRune(r rune) {
 			vs.buf = append(vs.buf[:vs.pos], append(append([]rune(nil), vs.yank...), vs.buf[vs.pos:]...)...)
 			vs.pos += len(vs.yank) - 1
 		}
+	case 'f':
+		next, err := readKey()
+		if err != nil || next.typ != keyRune {
+			return
+		}
+		vs.lastFChar, vs.lastFForward, vs.lastFSet = next.r, true, true
+		vs.findChar(next.r, true)
+	case 'F':
+		next, err := readKey()
+		if err != nil || next.typ != keyRune {
+			return
+		}
+		vs.lastFChar, vs.lastFForward, vs.lastFSet = next.r, false, true
+		vs.findChar(next.r, false)
+	case ';':
+		if vs.lastFSet {
+			vs.findChar(vs.lastFChar, vs.lastFForward)
+		}
+	case ',':
+		if vs.lastFSet {
+			vs.findChar(vs.lastFChar, !vs.lastFForward)
+		}
 	case 'k', '-':
 		vs.historyUp()
 	case 'j', '+':
 		vs.historyDown()
+	}
+}
+
+// ---- character search ----
+
+func (vs *viState) findChar(ch rune, forward bool) {
+	if forward {
+		for i := vs.pos + 1; i < len(vs.buf); i++ {
+			if vs.buf[i] == ch {
+				vs.pos = i
+				return
+			}
+		}
+	} else {
+		for i := vs.pos - 1; i >= 0; i-- {
+			if vs.buf[i] == ch {
+				vs.pos = i
+				return
+			}
+		}
 	}
 }
 

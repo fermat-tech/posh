@@ -701,36 +701,41 @@ func (p *Parser) parseSimpleCmd() (*SimpleCmd, error) {
 		cmd.Assigns = append(cmd.Assigns, t.Val)
 	}
 
-	// Collect words and redirections
+	// Collect words and redirections.
+	// Use peekRaw() so NEWLINE tokens are visible and terminate the command.
+	// (peek() skips newlines and would merge multi-line content into one command.)
 	for {
-		t = p.peek()
+		t = p.peekRaw()
+		if t.Type == lexer.NEWLINE {
+			goto done
+		}
 		if t.Type == lexer.WORD && p.stops[t.Val] {
 			break
 		}
 		switch t.Type {
 		case lexer.WORD:
-			p.consumeNonNL()
+			p.consume()
 			cmd.Words = append(cmd.Words, t.Val)
 
 		case lexer.REDIR_OUT, lexer.REDIR_APPEND, lexer.REDIR_IN,
 			lexer.REDIR_ERR, lexer.REDIR_ERR_APPEND, lexer.REDIR_BOTH:
 			op := t.Type
-			p.consumeNonNL()
+			p.consume()
 			file := p.peek()
 			if file.Type != lexer.WORD {
 				return nil, &ParseError{fmt.Sprintf("expected filename after %s", op)}
 			}
-			p.consumeNonNL()
+			p.consume()
 			cmd.Redirs = append(cmd.Redirs, Redir{Op: op, File: file.Val})
 
 		case lexer.HEREDOC_OP, lexer.HEREDOC_STRIP_OP:
 			strip := t.Type == lexer.HEREDOC_STRIP_OP
-			p.consumeNonNL()
+			p.consume()
 			delim := p.peek()
 			if delim.Type != lexer.WORD {
 				return nil, &ParseError{"expected heredoc delimiter"}
 			}
-			p.consumeNonNL()
+			p.consume()
 			// Content is stored in File field; the REPL/EvalString preprocesses heredocs
 			cmd.Redirs = append(cmd.Redirs, Redir{
 				Op:    lexer.HEREDOC_OP,

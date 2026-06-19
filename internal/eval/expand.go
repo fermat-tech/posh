@@ -10,6 +10,30 @@ import (
 	"unicode"
 )
 
+// protectedSpace / protectedTab match the sentinels inserted by the lexer for
+// single-quoted and backslash-escaped whitespace. They survive word splitting
+// and are restored to plain whitespace here after splitting is done.
+const protectedSpace rune = 0xE001
+const protectedTab   rune = 0xE002
+
+func unprotectWord(s string) string {
+	if !strings.ContainsRune(s, protectedSpace) && !strings.ContainsRune(s, protectedTab) {
+		return s
+	}
+	var sb strings.Builder
+	for _, r := range s {
+		switch r {
+		case protectedSpace:
+			sb.WriteByte(' ')
+		case protectedTab:
+			sb.WriteByte('\t')
+		default:
+			sb.WriteRune(r)
+		}
+	}
+	return sb.String()
+}
+
 // expandWords expands a slice of raw word tokens into concrete argument strings.
 // Steps: tilde → variable → command-sub → arithmetic → word-split → glob → quote stripping.
 func (sh *Shell) expandWords(words []string) []string {
@@ -17,14 +41,16 @@ func (sh *Shell) expandWords(words []string) []string {
 	for _, w := range words {
 		// Double-quoted strings are not word-split or glob-expanded
 		if strings.HasPrefix(w, `"`) && strings.HasSuffix(w, `"`) && len(w) >= 2 {
-			result = append(result, sh.expandWord(w))
+			result = append(result, unprotectWord(sh.expandWord(w)))
 			continue
 		}
 		expanded := sh.expandWord(w)
 		// Word splitting: split on IFS characters if expansion produced spaces/tabs
 		parts := sh.wordSplit(expanded)
 		for _, part := range parts {
-			result = append(result, sh.globExpand(part)...)
+			for _, g := range sh.globExpand(part) {
+				result = append(result, unprotectWord(g))
+			}
 		}
 	}
 	return result
