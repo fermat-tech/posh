@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strings"
 
@@ -619,13 +620,41 @@ func (sh *Shell) evalSimpleCmd(cmd *parser.SimpleCmd, stdin io.Reader, stdout, s
 		return 0
 	}
 
-	if err := c.Run(); err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok {
+	// Put the child in its own process group and capture Ctrl+C in posh.
+	// Windows does not forward CTRL_C_EVENT to child processes automatically,
+	// so we catch it here and send CTRL_BREAK_EVENT to the child's group.
+	setForegroundAttrs(c)
+	if err := c.Start(); err != nil {
+		fmt.Fprintf(rStderr, "%s: %v\n", sh.name, err)
+		return 1
+	}
+
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, os.Interrupt)
+	cmdDone := make(chan struct{})
+	go func() {
+		select {
+		case <-sigCh:
+			sendInterrupt(c.Process.Pid)
+		case <-cmdDone:
+		}
+	}()
+
+	runErr := c.Wait()
+	close(cmdDone)
+	signal.Stop(sigCh)
+	select {
+	case <-sigCh:
+	default:
+	}
+
+	if runErr != nil {
+		if exitErr, ok := runErr.(*exec.ExitError); ok {
 			code := exitErr.ExitCode()
 			sh.lastExit = code
 			return code
 		}
-		fmt.Fprintf(rStderr, "%s: %v\n", sh.name, err)
+		fmt.Fprintf(rStderr, "%s: %v\n", sh.name, runErr)
 		sh.lastExit = 1
 		return 1
 	}

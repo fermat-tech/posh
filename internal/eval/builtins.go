@@ -59,6 +59,7 @@ func init() {
 		"fg":      builtinFg,
 		"bg":      builtinBg,
 		"wait":    builtinWait,
+		"kill":    builtinKill,
 	}
 }
 
@@ -433,10 +434,11 @@ Built-in commands:
   unalias name...     Remove aliases
   history             Show command history
   type name...        Show type of name
-  jobs                List background jobs
+  jobs [-l]           List background jobs (-l includes PIDs)
   fg [%n]             Bring job to foreground
   bg [%n]             Resume job in background
   wait [%n|pid]       Wait for job/process
+  kill [-sig] pid|%n  Send signal to process or job (kill -l lists signals)
   test EXPR / [ EXPR ] Evaluate conditional expression
   break [n]           Break from n levels of loop
   continue [n]        Continue next iteration of loop
@@ -536,6 +538,104 @@ func builtinWait(sh *Shell, args []string, _ io.Reader, _, _ io.Writer) int {
 		}
 	}
 	return 0
+}
+
+// ---- kill ----
+
+// killSignals maps signal names/numbers to the os.Signal to send on Windows.
+// Windows only reliably delivers os.Kill (TerminateProcess) and os.Interrupt
+// (Ctrl+C event); everything else is mapped to one of those two.
+var killSignals = map[string]os.Signal{
+	"1": os.Kill, "HUP": os.Kill,
+	"2": os.Interrupt, "INT": os.Interrupt,
+	"3": os.Kill, "QUIT": os.Kill,
+	"6": os.Kill, "ABRT": os.Kill,
+	"9": os.Kill, "KILL": os.Kill,
+	"15": os.Kill, "TERM": os.Kill,
+	"19": os.Kill, "STOP": os.Kill,
+}
+
+var killSignalList = [][2]string{
+	{"1", "HUP"}, {"2", "INT"}, {"3", "QUIT"}, {"4", "ILL"},
+	{"5", "TRAP"}, {"6", "ABRT"}, {"8", "FPE"}, {"9", "KILL"},
+	{"11", "SEGV"}, {"13", "PIPE"}, {"14", "ALRM"}, {"15", "TERM"},
+	{"17", "CHLD"}, {"18", "CONT"}, {"19", "STOP"}, {"20", "TSTP"},
+	{"21", "TTIN"}, {"22", "TTOU"},
+}
+
+func builtinKill(sh *Shell, args []string, _ io.Reader, stdout, stderr io.Writer) int {
+	if len(args) == 0 {
+		fmt.Fprintf(stderr, "usage: kill [-signal] pid|%%job ...\n")
+		return 1
+	}
+
+	// -l: list signal names
+	if args[0] == "-l" {
+		for _, pair := range killSignalList {
+			fmt.Fprintf(stdout, "%s) SIG%s\n", pair[0], pair[1])
+		}
+		return 0
+	}
+
+	// Parse optional leading signal flag: -N  -SIGNAME  -NAME
+	sig := os.Kill // default is SIGTERM → mapped to Kill on Windows
+	targets := args
+	if strings.HasPrefix(args[0], "-") {
+		name := strings.ToUpper(strings.TrimPrefix(args[0], "-"))
+		name = strings.TrimPrefix(name, "SIG")
+		s, ok := killSignals[name]
+		if !ok {
+			fmt.Fprintf(stderr, "%s: kill: unknown signal %s\n", sh.name, args[0])
+			return 1
+		}
+		sig = s
+		targets = args[1:]
+	}
+
+	if len(targets) == 0 {
+		fmt.Fprintf(stderr, "usage: kill [-signal] pid|%%job ...\n")
+		return 1
+	}
+
+	code := 0
+	for _, t := range targets {
+		if strings.HasPrefix(t, "%") {
+			id := parseJobID(t)
+			found := false
+			for _, j := range sh.jobs.list() {
+				if j.ID == id {
+					found = true
+					if err := j.Cmd.Process.Signal(sig); err != nil {
+						fmt.Fprintf(stderr, "%s: kill: %%%d: %v\n", sh.name, id, err)
+						code = 1
+					}
+					break
+				}
+			}
+			if !found {
+				fmt.Fprintf(stderr, "%s: kill: %s: no such job\n", sh.name, t)
+				code = 1
+			}
+		} else {
+			pid, err := strconv.Atoi(t)
+			if err != nil || pid <= 0 {
+				fmt.Fprintf(stderr, "%s: kill: %s: invalid pid\n", sh.name, t)
+				code = 1
+				continue
+			}
+			proc, err := os.FindProcess(pid)
+			if err != nil {
+				fmt.Fprintf(stderr, "%s: kill: %d: %v\n", sh.name, pid, err)
+				code = 1
+				continue
+			}
+			if err := proc.Signal(sig); err != nil {
+				fmt.Fprintf(stderr, "%s: kill: %d: %v\n", sh.name, pid, err)
+				code = 1
+			}
+		}
+	}
+	return code
 }
 
 func parseJobID(s string) int {
