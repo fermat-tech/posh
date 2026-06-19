@@ -30,7 +30,8 @@ type Shell struct {
 	lastExit  int      // $?
 	jobs      *JobTable
 	traps     map[string]string // signal name → command
-	opts      map[string]bool   // shell options: set -o name / set +o name
+	opts         map[string]bool   // shell options: set -o name / set +o name
+	isBackground bool              // true when running as a background job goroutine
 
 	// I/O streams for this shell instance
 	Stdin  io.Reader
@@ -118,7 +119,7 @@ func (sh *Shell) Eval(node parser.Node) int {
 	case *parser.GroupCmd:
 		return sh.evalGroupCmd(n)
 	case *parser.SimpleCmd:
-		return sh.evalSimpleCmd(n, sh.Stdin, sh.Stdout, sh.Stderr, false)
+		return sh.evalSimpleCmd(n, sh.Stdin, sh.Stdout, sh.Stderr)
 	case *parser.IfCmd:
 		return sh.evalIfCmd(n)
 	case *parser.ForCmd:
@@ -191,7 +192,9 @@ func (sh *Shell) evalNode(n parser.Node, background bool) int {
 		return 0
 	}
 	if background {
-		go sh.fork().Eval(n)
+		child := sh.fork()
+		child.isBackground = true
+		go child.Eval(n)
 		return 0
 	}
 	return sh.Eval(n)
@@ -271,7 +274,7 @@ func (sh *Shell) evalPipeline(pipe *parser.Pipeline) int {
 func (sh *Shell) evalNodeIO(n parser.Node, stdin io.Reader, stdout, stderr io.Writer) int {
 	switch v := n.(type) {
 	case *parser.SimpleCmd:
-		return sh.evalSimpleCmd(v, stdin, stdout, stderr, false)
+		return sh.evalSimpleCmd(v, stdin, stdout, stderr)
 	default:
 		// Compound commands: temporarily redirect I/O
 		old := [3]interface{}{sh.Stdin, sh.Stdout, sh.Stderr}
@@ -522,7 +525,7 @@ func (sh *Shell) callFunc(def *parser.FuncDef, args []string) (code int) {
 
 // ---- simple command ----
 
-func (sh *Shell) evalSimpleCmd(cmd *parser.SimpleCmd, stdin io.Reader, stdout, stderr io.Writer, background bool) int {
+func (sh *Shell) evalSimpleCmd(cmd *parser.SimpleCmd, stdin io.Reader, stdout, stderr io.Writer) int {
 	// Inline assignments with no command
 	if len(cmd.Words) == 0 {
 		for _, a := range cmd.Assigns {
@@ -601,7 +604,13 @@ func (sh *Shell) evalSimpleCmd(cmd *parser.SimpleCmd, stdin io.Reader, stdout, s
 	c.Stdout = rStdout
 	c.Stderr = rStderr
 
-	if background {
+	if sh.isBackground {
+		// Detach stdin so the background process cannot consume key events
+		// from the console input buffer while the shell is reading input.
+		if devNull, err := os.Open(os.DevNull); err == nil {
+			c.Stdin = devNull
+			defer devNull.Close()
+		}
 		if err := c.Start(); err != nil {
 			fmt.Fprintf(rStderr, "%s: %v\n", sh.name, err)
 			return 1

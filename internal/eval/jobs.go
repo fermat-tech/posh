@@ -18,16 +18,30 @@ type Job struct {
 type JobTable struct {
 	mu   sync.Mutex
 	jobs []*Job
-	next int
 }
 
-func newJobTable() *JobTable { return &JobTable{next: 1} }
+func newJobTable() *JobTable { return &JobTable{} }
+
+// nextID returns the lowest positive integer not already in use.
+func (jt *JobTable) nextID() int {
+	for id := 1; ; id++ {
+		used := false
+		for _, j := range jt.jobs {
+			if j.ID == id {
+				used = true
+				break
+			}
+		}
+		if !used {
+			return id
+		}
+	}
+}
 
 func (jt *JobTable) add(cmd *exec.Cmd, desc string) *Job {
 	jt.mu.Lock()
 	defer jt.mu.Unlock()
-	j := &Job{ID: jt.next, Cmd: cmd, Desc: desc}
-	jt.next++
+	j := &Job{ID: jt.nextID(), Cmd: cmd, Desc: desc}
 	jt.jobs = append(jt.jobs, j)
 	fmt.Fprintf(os.Stderr, "[%d] %d\n", j.ID, cmd.Process.Pid)
 	// Reap in background

@@ -468,9 +468,14 @@ Control flow:
 
 // ---- jobs, fg, bg, wait ----
 
-func builtinJobs(sh *Shell, _ []string, _ io.Reader, stdout, _ io.Writer) int {
+func builtinJobs(sh *Shell, args []string, _ io.Reader, stdout, _ io.Writer) int {
+	long := len(args) > 0 && args[0] == "-l"
 	for _, j := range sh.jobs.list() {
-		fmt.Fprintf(stdout, "[%d] Running\t%s\n", j.ID, j.Desc)
+		if long {
+			fmt.Fprintf(stdout, "[%d] %d Running\t%s\n", j.ID, j.Cmd.Process.Pid, j.Desc)
+		} else {
+			fmt.Fprintf(stdout, "[%d] Running\t%s\n", j.ID, j.Desc)
+		}
 	}
 	return 0
 }
