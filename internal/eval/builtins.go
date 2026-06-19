@@ -237,8 +237,21 @@ func builtinEnv(sh *Shell, _ []string, _ io.Reader, stdout, _ io.Writer) int {
 	return 0
 }
 
-func builtinSet(sh *Shell, args []string, _ io.Reader, stdout, _ io.Writer) int {
+// knownOpts lists the shell options recognised by set -o / set +o.
+var knownOpts = map[string]bool{
+	"vi":       true,
+	"emacs":    true,
+	"errexit":  true,
+	"nounset":  true,
+	"noglob":   true,
+	"pipefail": true,
+	"xtrace":   true,
+	"verbose":  true,
+}
+
+func builtinSet(sh *Shell, args []string, _ io.Reader, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
+		// Print all shell variables
 		names := make([]string, 0, len(sh.vars))
 		for k := range sh.vars {
 			names = append(names, k)
@@ -249,11 +262,69 @@ func builtinSet(sh *Shell, args []string, _ io.Reader, stdout, _ io.Writer) int 
 		}
 		return 0
 	}
-	for _, a := range args {
-		idx := strings.IndexByte(a, '=')
-		if idx >= 0 {
-			sh.setVar(a[:idx], a[idx+1:])
+
+	i := 0
+	for i < len(args) {
+		a := args[i]
+		switch {
+		case a == "-o" || a == "+o":
+			enable := a == "-o"
+			i++
+			if i >= len(args) {
+				// No option name: print current option states
+				optNames := make([]string, 0, len(knownOpts))
+				for k := range knownOpts {
+					optNames = append(optNames, k)
+				}
+				sort.Strings(optNames)
+				for _, name := range optNames {
+					state := "off"
+					if sh.GetOpt(name) {
+						state = "on"
+					}
+					fmt.Fprintf(stdout, "%-12s %s\n", name, state)
+				}
+				return 0
+			}
+			name := args[i]
+			if !knownOpts[name] {
+				fmt.Fprintf(stderr, "set: unknown option: %s\n", name)
+				return 1
+			}
+			// vi and emacs are mutually exclusive editing modes
+			if name == "vi" && enable {
+				sh.SetOpt("emacs", false)
+			} else if name == "emacs" && enable {
+				sh.SetOpt("vi", false)
+			}
+			sh.SetOpt(name, enable)
+		case strings.HasPrefix(a, "-o"):
+			// -o<name> (no space)
+			name := a[2:]
+			if !knownOpts[name] {
+				fmt.Fprintf(stderr, "set: unknown option: %s\n", name)
+				return 1
+			}
+			if name == "vi" {
+				sh.SetOpt("emacs", false)
+			}
+			sh.SetOpt(name, true)
+		case strings.HasPrefix(a, "+o"):
+			// +o<name> (no space)
+			name := a[2:]
+			if !knownOpts[name] {
+				fmt.Fprintf(stderr, "set: unknown option: %s\n", name)
+				return 1
+			}
+			sh.SetOpt(name, false)
+		default:
+			// VAR=val assignment
+			idx := strings.IndexByte(a, '=')
+			if idx >= 0 {
+				sh.setVar(a[:idx], a[idx+1:])
+			}
 		}
+		i++
 	}
 	return 0
 }

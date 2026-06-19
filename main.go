@@ -10,11 +10,11 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/abiosoft/readline"
 	"github.com/fermat-tech/posh/internal/eval"
 	"github.com/fermat-tech/posh/internal/parser"
 	"github.com/mattn/go-colorable"
 	"github.com/mattn/go-isatty"
-	"github.com/peterh/liner"
 )
 
 var progName string
@@ -70,30 +70,26 @@ func runREPL(sh *eval.Shell) {
 		return
 	}
 
-	rl := liner.NewLiner()
-	defer func() {
-		if f, err := os.Create(histFile); err == nil {
-			rl.WriteHistory(f)
-			f.Close()
-		}
-		rl.Close()
-	}()
-
-	rl.SetCtrlCAborts(true)
-
-	// Load history
-	if f, err := os.Open(histFile); err == nil {
-		rl.ReadHistory(f)
-		f.Close()
+	rl, err := readline.NewEx(&readline.Config{
+		HistoryFile:     histFile,
+		HistoryLimit:    1000,
+		InterruptPrompt: "^C",
+		EOFPrompt:       "exit",
+		AutoComplete:    newCompleter(sh),
+	})
+	if err != nil {
+		runDumb(sh)
+		return
 	}
-
-	// Tab completion
-	c := &poshCompleter{sh: sh}
-	rl.SetWordCompleter(c.Complete)
+	defer rl.Close()
 
 	for {
+		// Sync vi/emacs mode with shell option before each prompt.
+		rl.SetVimMode(sh.GetOpt("vi"))
+		rl.SetPrompt(buildPrompt(sh))
+
 		input, err := readMultiLine(rl, sh)
-		if err == liner.ErrPromptAborted {
+		if err == readline.ErrInterrupt {
 			fmt.Fprintln(sh.Stderr)
 			continue
 		}
@@ -105,7 +101,6 @@ func runREPL(sh *eval.Shell) {
 		if input == "" {
 			continue
 		}
-		rl.AppendHistory(input)
 		sh.History = append(sh.History, input)
 		sh.EvalString(input)
 	}
@@ -113,15 +108,11 @@ func runREPL(sh *eval.Shell) {
 
 // readMultiLine reads one complete shell command, prompting for more lines
 // when the input appears incomplete (open compound commands, trailing operators).
-func readMultiLine(rl *liner.State, sh *eval.Shell) (string, error) {
+func readMultiLine(rl *readline.Instance, sh *eval.Shell) (string, error) {
 	var lines []string
 
 	for {
-		prompt := buildPrompt(sh)
-		if len(lines) > 0 {
-			prompt = "> "
-		}
-		line, err := rl.Prompt(prompt)
+		line, err := rl.Readline()
 		if err != nil {
 			if len(lines) == 0 {
 				return "", err
@@ -133,6 +124,7 @@ func readMultiLine(rl *liner.State, sh *eval.Shell) (string, error) {
 		if !parser.NeedsContinuation(full) {
 			return full, nil
 		}
+		rl.SetPrompt("> ")
 	}
 }
 
@@ -190,16 +182,16 @@ type poshCompleter struct {
 	sh *eval.Shell
 }
 
-// Complete implements liner.WordCompleter.
-// Returns (head, completions, tail) where head is line[:wordStart],
-// completions are the full candidates, and tail is line[pos:].
-func (c *poshCompleter) Complete(line string, pos int) (string, []string, string) {
-	head := line[:pos]
-	tail := line[pos:]
-	wordStart := strings.LastIndexAny(head, " \t|&;(") + 1
-	prefix := head[wordStart:]
-	isFirstWord := strings.TrimSpace(head[:wordStart]) == "" ||
-		strings.ContainsAny(strings.TrimRight(head[:wordStart], " \t"), "|&;(")
+func newCompleter(sh *eval.Shell) readline.AutoCompleter {
+	return &poshCompleter{sh: sh}
+}
+
+func (c *poshCompleter) Do(line []rune, pos int) (newLine [][]rune, length int) {
+	full := string(line[:pos])
+	wordStart := strings.LastIndexAny(full, " \t|&;(") + 1
+	prefix := full[wordStart:]
+	isFirstWord := strings.TrimSpace(full[:wordStart]) == "" ||
+		strings.ContainsAny(strings.TrimRight(full[:wordStart], " \t"), "|&;(")
 
 	var candidates []string
 	if isFirstWord {
@@ -209,13 +201,13 @@ func (c *poshCompleter) Complete(line string, pos int) (string, []string, string
 	}
 	sort.Strings(candidates)
 
-	var completions []string
+	var completions [][]rune
 	for _, cand := range candidates {
 		if strings.HasPrefix(cand, prefix) {
-			completions = append(completions, cand)
+			completions = append(completions, []rune(cand[len(prefix):]))
 		}
 	}
-	return head[:wordStart], completions, tail
+	return completions, len(prefix)
 }
 
 var builtinNames = []string{
@@ -230,7 +222,6 @@ func (c *poshCompleter) commandCandidates(prefix string) []string {
 	seen := make(map[string]bool)
 	var out []string
 
-	// Builtins
 	for _, b := range builtinNames {
 		if strings.HasPrefix(b, prefix) && !seen[b] {
 			seen[b] = true
@@ -238,7 +229,6 @@ func (c *poshCompleter) commandCandidates(prefix string) []string {
 		}
 	}
 
-	// PATH executables
 	pathExts := strings.Split(os.Getenv("PATHEXT"), string(os.PathListSeparator))
 	for _, dir := range strings.Split(os.Getenv("PATH"), string(os.PathListSeparator)) {
 		entries, err := os.ReadDir(dir)
@@ -263,7 +253,6 @@ func (c *poshCompleter) commandCandidates(prefix string) []string {
 			}
 		}
 	}
-
 	return out
 }
 

@@ -30,6 +30,7 @@ type Shell struct {
 	lastExit  int      // $?
 	jobs      *JobTable
 	traps     map[string]string // signal name → command
+	opts      map[string]bool   // shell options: set -o name / set +o name
 
 	// I/O streams for this shell instance
 	Stdin  io.Reader
@@ -49,6 +50,7 @@ func New(name string) *Shell {
 		funcs:    make(map[string]*parser.FuncDef),
 		jobs:     newJobTable(),
 		traps:    make(map[string]string),
+		opts:     make(map[string]bool),
 		Stdin:    os.Stdin,
 		Stdout:   os.Stdout,
 		Stderr:   os.Stderr,
@@ -66,6 +68,14 @@ func New(name string) *Shell {
 
 // GetVar is the exported accessor for use outside the package.
 func (sh *Shell) GetVar(name string) string { return sh.getVar(name) }
+func (sh *Shell) GetOpt(name string) bool   { return sh.opts[name] }
+func (sh *Shell) SetOpt(name string, val bool) {
+	if val {
+		sh.opts[name] = true
+	} else {
+		delete(sh.opts, name)
+	}
+}
 
 func (sh *Shell) getVar(name string) string {
 	if v, ok := sh.vars[name]; ok {
