@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"sort"
 	"strconv"
 	"strings"
@@ -54,11 +55,17 @@ func init() {
 
 // ---- clear ----
 
-func builtinClear(_ *Shell, _ []string, _ io.Reader, stdout, _ io.Writer) int {
-	// \033[2J clears the visible screen; \033[H moves cursor to top-left.
-	// go-colorable translates these ANSI codes to Win32 Console API calls on
-	// old cmd.exe, so this works in every Windows terminal.
-	fmt.Fprint(stdout, "\033[2J\033[H")
+func builtinClear(_ *Shell, _ []string, _ io.Reader, _ io.Writer, _ io.Writer) int {
+	// cmd /c cls uses the Win32 Console API directly, which properly clears
+	// the screen on both old Command Prompt and new Windows Terminal.
+	// We bind it to os.Stdout (the real console handle) rather than our
+	// wrapped writer, because cls writes via CONOUT$ internally.
+	c := exec.Command("cmd", "/c", "cls")
+	c.Stdout = os.Stdout
+	if err := c.Run(); err != nil {
+		// Fallback: ANSI escape for non-Windows or unusual setups
+		fmt.Fprint(os.Stdout, "\033[2J\033[H")
+	}
 	return 0
 }
 
