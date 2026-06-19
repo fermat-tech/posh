@@ -43,6 +43,7 @@ func init() {
 		"find":    makeToolBuiltin("winfind", "find"),
 		"head":    makeToolBuiltin("winhead", "head"),
 		"tail":    makeToolBuiltin("wintail", "tail"),
+		"less":    makeToolBuiltin("winless", "less"),
 		"true":    func(_ *Shell, _ []string, _ io.Reader, _, _ io.Writer) int { return 0 },
 		"false":   func(_ *Shell, _ []string, _ io.Reader, _, _ io.Writer) int { return 1 },
 		":":       func(_ *Shell, _ []string, _ io.Reader, _, _ io.Writer) int { return 0 },
