@@ -6,17 +6,15 @@ import (
 	"io"
 	"net"
 	"os"
-	"os/signal"
 	"path/filepath"
 	"sort"
 	"strings"
-	"syscall"
 
-	"github.com/chzyer/readline"
 	"github.com/fermat-tech/posh/internal/eval"
 	"github.com/fermat-tech/posh/internal/parser"
 	"github.com/mattn/go-colorable"
 	"github.com/mattn/go-isatty"
+	"github.com/peterh/liner"
 )
 
 var progName string
@@ -72,34 +70,30 @@ func runREPL(sh *eval.Shell) {
 		return
 	}
 
-	rl, err := readline.NewEx(&readline.Config{
-		HistoryFile:     histFile,
-		HistoryLimit:    1000,
-		InterruptPrompt: "^C",
-		EOFPrompt:       "exit",
-		AutoComplete:    newCompleter(sh),
-	})
-	if err != nil {
-		runDumb(sh)
-		return
-	}
-	defer rl.Close()
-
-	// Ctrl+C: interrupt current command, return to prompt
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT)
-	go func() {
-		for range sigCh {
-			rl.SetPrompt(buildPrompt(sh))
-			rl.Refresh()
+	rl := liner.NewLiner()
+	defer func() {
+		if f, err := os.Create(histFile); err == nil {
+			rl.WriteHistory(f)
+			f.Close()
 		}
+		rl.Close()
 	}()
 
+	rl.SetCtrlCAborts(true)
+
+	// Load history
+	if f, err := os.Open(histFile); err == nil {
+		rl.ReadHistory(f)
+		f.Close()
+	}
+
+	// Tab completion
+	c := &poshCompleter{sh: sh}
+	rl.SetWordCompleter(c.Complete)
+
 	for {
-		// Multi-line input: keep reading until the command is complete
-		rl.SetPrompt(buildPrompt(sh))
 		input, err := readMultiLine(rl, sh)
-		if err == readline.ErrInterrupt {
+		if err == liner.ErrPromptAborted {
 			fmt.Fprintln(sh.Stderr)
 			continue
 		}
@@ -111,6 +105,7 @@ func runREPL(sh *eval.Shell) {
 		if input == "" {
 			continue
 		}
+		rl.AppendHistory(input)
 		sh.History = append(sh.History, input)
 		sh.EvalString(input)
 	}
@@ -118,26 +113,26 @@ func runREPL(sh *eval.Shell) {
 
 // readMultiLine reads one complete shell command, prompting for more lines
 // when the input appears incomplete (open compound commands, trailing operators).
-func readMultiLine(rl *readline.Instance, sh *eval.Shell) (string, error) {
+func readMultiLine(rl *liner.State, sh *eval.Shell) (string, error) {
 	var lines []string
 
 	for {
-		line, err := rl.Readline()
+		prompt := buildPrompt(sh)
+		if len(lines) > 0 {
+			prompt = "> "
+		}
+		line, err := rl.Prompt(prompt)
 		if err != nil {
 			if len(lines) == 0 {
 				return "", err
 			}
-			// Return what we have on EOF/interrupt
 			return strings.Join(lines, "\n"), err
 		}
 		lines = append(lines, line)
 		full := strings.Join(lines, "\n")
-
 		if !parser.NeedsContinuation(full) {
 			return full, nil
 		}
-		// Need more input
-		rl.SetPrompt("> ")
 	}
 }
 
@@ -195,37 +190,32 @@ type poshCompleter struct {
 	sh *eval.Shell
 }
 
-func newCompleter(sh *eval.Shell) readline.AutoCompleter {
-	return &poshCompleter{sh: sh}
-}
-
-func (c *poshCompleter) Do(line []rune, pos int) (newLine [][]rune, length int) {
-	full := string(line[:pos])
-	// Find the current word being typed
-	wordStart := strings.LastIndexAny(full, " \t|&;(") + 1
-	prefix := full[wordStart:]
-	isFirstWord := strings.TrimSpace(full[:wordStart]) == "" ||
-		strings.ContainsAny(strings.TrimRight(full[:wordStart], " \t"), "|&;(")
+// Complete implements liner.WordCompleter.
+// Returns (head, completions, tail) where head is line[:wordStart],
+// completions are the full candidates, and tail is line[pos:].
+func (c *poshCompleter) Complete(line string, pos int) (string, []string, string) {
+	head := line[:pos]
+	tail := line[pos:]
+	wordStart := strings.LastIndexAny(head, " \t|&;(") + 1
+	prefix := head[wordStart:]
+	isFirstWord := strings.TrimSpace(head[:wordStart]) == "" ||
+		strings.ContainsAny(strings.TrimRight(head[:wordStart], " \t"), "|&;(")
 
 	var candidates []string
-
 	if isFirstWord {
-		// Complete commands: builtins + functions + PATH executables
 		candidates = c.commandCandidates(prefix)
 	} else {
-		// Complete filenames
 		candidates = c.fileCandidates(prefix)
 	}
-
 	sort.Strings(candidates)
 
-	var completions [][]rune
+	var completions []string
 	for _, cand := range candidates {
 		if strings.HasPrefix(cand, prefix) {
-			completions = append(completions, []rune(cand[len(prefix):]))
+			completions = append(completions, cand)
 		}
 	}
-	return completions, len(prefix)
+	return head[:wordStart], completions, tail
 }
 
 var builtinNames = []string{
@@ -233,7 +223,7 @@ var builtinNames = []string{
 	"source", ".", "alias", "unalias", "history", "type", "help", "true",
 	"false", ":", "jobs", "fg", "bg", "wait", "test", "[", "break",
 	"continue", "return", "read", "shift", "trap", "clear",
-	"ls", "wc", "which", "grep", "egrep", "find", "head", "tail",
+	"ls", "wc", "which", "grep", "egrep", "find", "head", "tail", "less",
 }
 
 func (c *poshCompleter) commandCandidates(prefix string) []string {
@@ -287,7 +277,6 @@ func (c *poshCompleter) fileCandidates(prefix string) []string {
 
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		// Try current directory
 		entries, err = os.ReadDir(".")
 		if err != nil {
 			return nil
