@@ -212,8 +212,14 @@ func (sh *Shell) evalPipeline(pipe *parser.Pipeline) int {
 			sub := sh.fork()
 			sub.Stdin, sub.Stdout, sub.Stderr = in, out, sh.Stderr
 			code := sub.evalNodeIO(node, in, out, sh.Stderr)
+			// Close the write end so the next stage sees EOF.
 			if idx < n-1 {
 				pipeW[idx].Close()
+			}
+			// Close the read end so the previous stage gets a broken-pipe
+			// error and exits instead of blocking on a full pipe buffer.
+			if idx > 0 {
+				pipes[idx-1].Close()
 			}
 			results[idx] <- result{code}
 		}(i, cmd, stdin, stdout)

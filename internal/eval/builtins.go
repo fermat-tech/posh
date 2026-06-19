@@ -35,6 +35,14 @@ func init() {
 		"type":    builtinType,
 		"help":    builtinHelp,
 		"clear":   builtinClear,
+		"ls":      makeToolBuiltin("winls", "ls"),
+		"wc":      makeToolBuiltin("winwc", "wc"),
+		"which":   makeToolBuiltin("winwhich", "which"),
+		"grep":    makeToolBuiltin("winegrep", "grep"),
+		"egrep":   makeToolBuiltin("winegrep", "egrep"),
+		"find":    makeToolBuiltin("winfind", "find"),
+		"head":    makeToolBuiltin("winhead", "head"),
+		"tail":    makeToolBuiltin("wintail", "tail"),
 		"true":    func(_ *Shell, _ []string, _ io.Reader, _, _ io.Writer) int { return 0 },
 		"false":   func(_ *Shell, _ []string, _ io.Reader, _, _ io.Writer) int { return 1 },
 		":":       func(_ *Shell, _ []string, _ io.Reader, _, _ io.Writer) int { return 0 },
@@ -50,6 +58,36 @@ func init() {
 		"fg":      builtinFg,
 		"bg":      builtinBg,
 		"wait":    builtinWait,
+	}
+}
+
+// ---- delegating tool builtins ----
+
+// makeToolBuiltin returns a builtin that tries preferredName first (e.g. "winls"),
+// then fallbackName (e.g. "ls"), running whichever is found in PATH.
+// This lets ls/grep/wc/which/find/head/tail resolve to the win* equivalents when
+// they are installed, while still working with any other tool on PATH.
+func makeToolBuiltin(preferredName, fallbackName string) builtinFn {
+	return func(sh *Shell, args []string, stdin io.Reader, stdout, stderr io.Writer) int {
+		for _, name := range []string{preferredName, fallbackName} {
+			path, found := lookupCommand(name)
+			if !found {
+				continue
+			}
+			c := exec.Command(path, args...)
+			c.Stdin = stdin
+			c.Stdout = stdout
+			c.Stderr = stderr
+			if err := c.Run(); err != nil {
+				if exitErr, ok := err.(*exec.ExitError); ok {
+					return exitErr.ExitCode()
+				}
+				return 1
+			}
+			return 0
+		}
+		fmt.Fprintf(stderr, "%s: command not found\n", preferredName)
+		return 127
 	}
 }
 
@@ -331,6 +369,13 @@ Built-in commands:
   shift [n]           Shift positional parameters
   trap [cmd] [SIG]    Set signal handler
   true / false / :    Exit 0 / 1 / 0
+  clear               Clear the screen
+  ls                  List directory (uses winls if installed)
+  wc                  Word/line/byte count (uses winwc if installed)
+  which               Locate command (uses winwhich if installed)
+  grep / egrep        Search files (uses winegrep if installed)
+  find                Find files (uses winfind if installed)
+  head / tail         Print first/last lines (uses winhead/wintail if installed)
   help                Show this help
   exit [n]            Exit shell
 
