@@ -1,14 +1,14 @@
 module github.com/fermat-tech/posh
 
-go 1.21
+go 1.25.0
 
 require (
-	github.com/abiosoft/readline v0.0.0-20180607040430-155bce2042db
 	github.com/mattn/go-colorable v0.1.13
 	github.com/mattn/go-isatty v0.0.20
+	github.com/peterh/liner v1.2.2
 )
 
 require (
-	github.com/chzyer/test v1.0.0 // indirect
-	golang.org/x/sys v0.6.0 // indirect
+	github.com/mattn/go-runewidth v0.0.3 // indirect
+	golang.org/x/sys v0.46.0 // indirect
 )

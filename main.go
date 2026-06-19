@@ -10,11 +10,11 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/abiosoft/readline"
 	"github.com/fermat-tech/posh/internal/eval"
 	"github.com/fermat-tech/posh/internal/parser"
 	"github.com/mattn/go-colorable"
 	"github.com/mattn/go-isatty"
+	"github.com/peterh/liner"
 )
 
 var progName string
@@ -70,49 +70,96 @@ func runREPL(sh *eval.Shell) {
 		return
 	}
 
-	rl, err := readline.NewEx(&readline.Config{
-		HistoryFile:     histFile,
-		HistoryLimit:    1000,
-		InterruptPrompt: "^C",
-		EOFPrompt:       "exit",
-		AutoComplete:    newCompleter(sh),
-	})
-	if err != nil {
-		runDumb(sh)
-		return
+	c := &poshCompleter{sh: sh}
+
+	// openLiner / closeLiner manage a single liner instance.
+	// liner and the vi raw-mode editor must never be open at the same time.
+	var rl *liner.State
+
+	openLiner := func() {
+		if rl != nil {
+			return
+		}
+		rl = liner.NewLiner()
+		rl.SetCtrlCAborts(true)
+		for _, h := range sh.History {
+			rl.AppendHistory(h)
+		}
+		rl.SetWordCompleter(c.Complete)
 	}
-	defer rl.Close()
+
+	closeLiner := func() {
+		if rl == nil {
+			return
+		}
+		if f, err := os.Create(histFile); err == nil {
+			rl.WriteHistory(f)
+			f.Close()
+		}
+		rl.Close()
+		rl = nil
+	}
+
+	defer closeLiner()
+
+	// Pre-load history from file into sh.History so the vi editor can use it.
+	if f, err := os.Open(histFile); err == nil {
+		sc := bufio.NewScanner(f)
+		for sc.Scan() {
+			if line := sc.Text(); line != "" {
+				sh.History = append(sh.History, line)
+			}
+		}
+		f.Close()
+	}
+
+	// Open liner now only if not starting in vi mode.
+	if !sh.GetOpt("vi") {
+		openLiner()
+	}
 
 	for {
-		// Sync vi/emacs mode with shell option before each prompt.
-		rl.SetVimMode(sh.GetOpt("vi"))
-		rl.SetPrompt(buildPrompt(sh))
+		var input string
+		var err error
 
-		input, err := readMultiLine(rl, sh)
-		if err == readline.ErrInterrupt {
+		if sh.GetOpt("vi") {
+			closeLiner() // release terminal if we just switched from emacs
+			input, err = viReadMultiLine(sh)
+		} else {
+			openLiner() // acquire terminal if we just switched from vi
+			input, err = linerReadMultiLine(rl, sh)
+		}
+
+		if isViInterrupt(err) || err == liner.ErrPromptAborted {
 			fmt.Fprintln(sh.Stderr)
 			continue
 		}
-		if err == io.EOF {
+		if isViEOF(err) || err == io.EOF {
 			fmt.Fprintln(sh.Stdout)
 			break
 		}
+
 		input = strings.TrimSpace(input)
 		if input == "" {
 			continue
+		}
+		if rl != nil {
+			rl.AppendHistory(input)
 		}
 		sh.History = append(sh.History, input)
 		sh.EvalString(input)
 	}
 }
 
-// readMultiLine reads one complete shell command, prompting for more lines
-// when the input appears incomplete (open compound commands, trailing operators).
-func readMultiLine(rl *readline.Instance, sh *eval.Shell) (string, error) {
+// linerReadMultiLine reads one complete command using liner (emacs mode).
+func linerReadMultiLine(rl *liner.State, sh *eval.Shell) (string, error) {
 	var lines []string
-
 	for {
-		line, err := rl.Readline()
+		prompt := buildPrompt(sh)
+		if len(lines) > 0 {
+			prompt = "> "
+		}
+		line, err := rl.Prompt(prompt)
 		if err != nil {
 			if len(lines) == 0 {
 				return "", err
@@ -124,7 +171,29 @@ func readMultiLine(rl *readline.Instance, sh *eval.Shell) (string, error) {
 		if !parser.NeedsContinuation(full) {
 			return full, nil
 		}
-		rl.SetPrompt("> ")
+	}
+}
+
+// viReadMultiLine reads one complete command using the vi-mode editor.
+func viReadMultiLine(sh *eval.Shell) (string, error) {
+	var lines []string
+	for {
+		prompt := buildPrompt(sh)
+		if len(lines) > 0 {
+			prompt = "> "
+		}
+		line, err := viReadLine(prompt, sh.History)
+		if err != nil {
+			if len(lines) == 0 {
+				return "", err
+			}
+			return strings.Join(lines, "\n"), err
+		}
+		lines = append(lines, line)
+		full := strings.Join(lines, "\n")
+		if !parser.NeedsContinuation(full) {
+			return full, nil
+		}
 	}
 }
 
@@ -176,22 +245,19 @@ func runDumb(sh *eval.Shell) {
 	}
 }
 
-// ---- tab completion ----
+// ---- tab completion (liner WordCompleter) ----
 
 type poshCompleter struct {
 	sh *eval.Shell
 }
 
-func newCompleter(sh *eval.Shell) readline.AutoCompleter {
-	return &poshCompleter{sh: sh}
-}
-
-func (c *poshCompleter) Do(line []rune, pos int) (newLine [][]rune, length int) {
-	full := string(line[:pos])
-	wordStart := strings.LastIndexAny(full, " \t|&;(") + 1
-	prefix := full[wordStart:]
-	isFirstWord := strings.TrimSpace(full[:wordStart]) == "" ||
-		strings.ContainsAny(strings.TrimRight(full[:wordStart], " \t"), "|&;(")
+func (c *poshCompleter) Complete(line string, pos int) (string, []string, string) {
+	head := line[:pos]
+	tail := line[pos:]
+	wordStart := strings.LastIndexAny(head, " \t|&;(") + 1
+	prefix := head[wordStart:]
+	isFirstWord := strings.TrimSpace(head[:wordStart]) == "" ||
+		strings.ContainsAny(strings.TrimRight(head[:wordStart], " \t"), "|&;(")
 
 	var candidates []string
 	if isFirstWord {
@@ -201,13 +267,13 @@ func (c *poshCompleter) Do(line []rune, pos int) (newLine [][]rune, length int) 
 	}
 	sort.Strings(candidates)
 
-	var completions [][]rune
+	var completions []string
 	for _, cand := range candidates {
 		if strings.HasPrefix(cand, prefix) {
-			completions = append(completions, []rune(cand[len(prefix):]))
+			completions = append(completions, cand)
 		}
 	}
-	return completions, len(prefix)
+	return head[:wordStart], completions, tail
 }
 
 var builtinNames = []string{
