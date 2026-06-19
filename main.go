@@ -232,7 +232,7 @@ var builtinNames = []string{
 	"cd", "pwd", "echo", "printf", "exit", "export", "unset", "env", "set",
 	"source", ".", "alias", "unalias", "history", "type", "help", "true",
 	"false", ":", "jobs", "fg", "bg", "wait", "test", "[", "break",
-	"continue", "return", "read", "shift", "trap",
+	"continue", "return", "read", "shift", "trap", "clear",
 }
 
 func (c *poshCompleter) commandCandidates(prefix string) []string {

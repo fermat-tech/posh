@@ -33,6 +33,7 @@ func init() {
 		"history": builtinHistory,
 		"type":    builtinType,
 		"help":    builtinHelp,
+		"clear":   builtinClear,
 		"true":    func(_ *Shell, _ []string, _ io.Reader, _, _ io.Writer) int { return 0 },
 		"false":   func(_ *Shell, _ []string, _ io.Reader, _, _ io.Writer) int { return 1 },
 		":":       func(_ *Shell, _ []string, _ io.Reader, _, _ io.Writer) int { return 0 },
@@ -49,6 +50,16 @@ func init() {
 		"bg":      builtinBg,
 		"wait":    builtinWait,
 	}
+}
+
+// ---- clear ----
+
+func builtinClear(_ *Shell, _ []string, _ io.Reader, stdout, _ io.Writer) int {
+	// \033[2J clears the visible screen; \033[H moves cursor to top-left.
+	// go-colorable translates these ANSI codes to Win32 Console API calls on
+	// old cmd.exe, so this works in every Windows terminal.
+	fmt.Fprint(stdout, "\033[2J\033[H")
+	return 0
 }
 
 // ---- cd, pwd ----
