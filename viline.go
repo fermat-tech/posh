@@ -503,18 +503,17 @@ func (vs *viState) redraw() {
 	sb.WriteString(string(vs.buf))
 
 	// Erase leftover characters if the line got shorter since last redraw.
+	// endCol is where the cursor actually sits after writing buf + erase spaces.
+	endCol := currentLen
+	if vs.lastDisplayLen > endCol {
+		endCol = vs.lastDisplayLen
+	}
 	for i := currentLen; i < vs.lastDisplayLen; i++ {
 		sb.WriteByte(' ')
 	}
 	vs.lastDisplayLen = currentLen
 
 	// Move cursor back to the correct position using backspaces.
-	// After writing we are at column max(currentLen, lastDisplayLen);
-	// we want to be at column (promptVW + pos).
-	endCol := currentLen
-	if vs.lastDisplayLen > endCol {
-		endCol = vs.lastDisplayLen
-	}
 	target := promptVW + vs.pos
 	for i := target; i < endCol; i++ {
 		sb.WriteByte('\b')
