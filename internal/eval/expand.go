@@ -1,0 +1,389 @@
+package eval
+
+import (
+	"fmt"
+	"os"
+	"os/user"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"unicode"
+)
+
+// expandWords expands a slice of raw word tokens into concrete argument strings.
+// Steps: tilde → variable → command-sub → arithmetic → glob → quote stripping.
+func (sh *Shell) expandWords(words []string) []string {
+	var result []string
+	for _, w := range words {
+		expanded := sh.expandWord(w)
+		// Glob expansion on unquoted words
+		globbed := sh.globExpand(expanded)
+		result = append(result, globbed...)
+	}
+	return result
+}
+
+// expandWord performs tilde, variable, command-substitution, arithmetic expansion
+// and quote stripping on a single word token.
+func (sh *Shell) expandWord(w string) string {
+	// Fast path: no special chars
+	if !strings.ContainsAny(w, `~$"'\`) {
+		return w
+	}
+
+	// Handle double-quoted string (stored with leading/trailing " sentinels by lexer)
+	if strings.HasPrefix(w, `"`) && strings.HasSuffix(w, `"`) && len(w) >= 2 {
+		inner := w[1 : len(w)-1]
+		return sh.expandInsideDoubleQuotes(inner)
+	}
+
+	// Handle tilde at start (bare, unquoted)
+	if strings.HasPrefix(w, "~/") || w == "~" {
+		home := sh.homeDir()
+		if w == "~" {
+			return home
+		}
+		return filepath.Join(home, w[2:])
+	}
+
+	return sh.expandUnquoted(w)
+}
+
+// expandInsideDoubleQuotes expands $VAR and $() inside double quotes.
+func (sh *Shell) expandInsideDoubleQuotes(s string) string {
+	var sb strings.Builder
+	runes := []rune(s)
+	i := 0
+	for i < len(runes) {
+		ch := runes[i]
+		if ch == '$' {
+			val, n := sh.expandDollar(runes, i)
+			sb.WriteString(val)
+			i += n
+		} else {
+			sb.WriteRune(ch)
+			i++
+		}
+	}
+	return sb.String()
+}
+
+// expandUnquoted expands a bare (unquoted) word.
+func (sh *Shell) expandUnquoted(s string) string {
+	var sb strings.Builder
+	runes := []rune(s)
+	i := 0
+	for i < len(runes) {
+		ch := runes[i]
+		switch ch {
+		case '$':
+			val, n := sh.expandDollar(runes, i)
+			sb.WriteString(val)
+			i += n
+		case '\'':
+			// Single-quoted segment — literal until closing '
+			i++
+			for i < len(runes) && runes[i] != '\'' {
+				sb.WriteRune(runes[i])
+				i++
+			}
+			if i < len(runes) {
+				i++ // closing '
+			}
+		case '"':
+			// Nested double-quoted segment
+			i++
+			start := i
+			for i < len(runes) && runes[i] != '"' {
+				i++
+			}
+			sb.WriteString(sh.expandInsideDoubleQuotes(string(runes[start:i])))
+			if i < len(runes) {
+				i++ // closing "
+			}
+		case '\\':
+			i++
+			if i < len(runes) {
+				sb.WriteRune(runes[i])
+				i++
+			}
+		default:
+			sb.WriteRune(ch)
+			i++
+		}
+	}
+	return sb.String()
+}
+
+// expandDollar processes a $ substitution starting at runes[i].
+// Returns the expanded string and the number of runes consumed.
+func (sh *Shell) expandDollar(runes []rune, i int) (string, int) {
+	if i+1 >= len(runes) {
+		return "$", 1
+	}
+	next := runes[i+1]
+
+	switch next {
+	case '(':
+		// Command substitution $(...) or arithmetic $((...))
+		if i+2 < len(runes) && runes[i+2] == '(' {
+			val, n := sh.expandArith(runes, i)
+			return val, n
+		}
+		val, n := sh.expandCmdSub(runes, i)
+		return val, n
+
+	case '{':
+		val, n := sh.expandBrace(runes, i)
+		return val, n
+
+	case '?':
+		return strconv.Itoa(sh.lastExit), 2
+
+	case '$':
+		return strconv.Itoa(os.Getpid()), 2
+
+	case '0':
+		return sh.name, 2
+
+	default:
+		if unicode.IsLetter(next) || next == '_' {
+			end := i + 2
+			for end < len(runes) && (unicode.IsLetter(runes[end]) || unicode.IsDigit(runes[end]) || runes[end] == '_') {
+				end++
+			}
+			name := string(runes[i+1 : end])
+			return sh.getVar(name), end - i
+		}
+		return "$", 1
+	}
+}
+
+// expandBrace handles ${VAR} or ${VAR:-default} etc.
+func (sh *Shell) expandBrace(runes []rune, i int) (string, int) {
+	// Find closing }
+	depth := 0
+	j := i + 2 // skip ${
+	for j < len(runes) {
+		if runes[j] == '{' {
+			depth++
+		} else if runes[j] == '}' {
+			if depth == 0 {
+				break
+			}
+			depth--
+		}
+		j++
+	}
+	if j >= len(runes) {
+		return "${", 2
+	}
+	inner := string(runes[i+2 : j])
+	consumed := j - i + 1
+
+	// ${VAR:-default}
+	if idx := strings.Index(inner, ":-"); idx >= 0 {
+		name := inner[:idx]
+		def := inner[idx+2:]
+		val := sh.getVar(name)
+		if val == "" {
+			return sh.expandWord(def), consumed
+		}
+		return val, consumed
+	}
+	// ${VAR:+alt}
+	if idx := strings.Index(inner, ":+"); idx >= 0 {
+		name := inner[:idx]
+		alt := inner[idx+2:]
+		if sh.getVar(name) != "" {
+			return sh.expandWord(alt), consumed
+		}
+		return "", consumed
+	}
+	// ${#VAR}
+	if strings.HasPrefix(inner, "#") {
+		return strconv.Itoa(len(sh.getVar(inner[1:]))), consumed
+	}
+	return sh.getVar(inner), consumed
+}
+
+// expandCmdSub runs $(...) and returns its trimmed stdout.
+func (sh *Shell) expandCmdSub(runes []rune, i int) (string, int) {
+	depth := 0
+	j := i + 2 // skip $(
+	for j < len(runes) {
+		if runes[j] == '(' {
+			depth++
+		} else if runes[j] == ')' {
+			if depth == 0 {
+				break
+			}
+			depth--
+		}
+		j++
+	}
+	if j >= len(runes) {
+		return "$(", 2
+	}
+	inner := string(runes[i+2 : j])
+	consumed := j - i + 1
+
+	out, err := sh.runCaptured(inner)
+	if err != nil {
+		return "", consumed
+	}
+	return strings.TrimRight(out, "\n"), consumed
+}
+
+// expandArith evaluates $((expr)).
+func (sh *Shell) expandArith(runes []rune, i int) (string, int) {
+	// Find closing ))
+	j := i + 3 // skip $((
+	depth := 0
+	for j < len(runes)-1 {
+		if runes[j] == '(' {
+			depth++
+		} else if runes[j] == ')' && runes[j+1] == ')' {
+			if depth == 0 {
+				break
+			}
+			depth--
+		}
+		j++
+	}
+	if j >= len(runes)-1 {
+		return "$((", 3
+	}
+	expr := string(runes[i+3 : j])
+	consumed := j - i + 2 // include ))
+
+	val := evalArith(sh, expr)
+	return strconv.FormatInt(val, 10), consumed
+}
+
+// globExpand expands glob metacharacters in a single word.
+// If no metacharacters or no matches, returns the word unchanged.
+func (sh *Shell) globExpand(w string) []string {
+	// Don't glob if the word came from a quoted context (no metacharacters survive quoting)
+	if !strings.ContainsAny(w, "*?[") {
+		return []string{w}
+	}
+	matches, err := filepath.Glob(w)
+	if err != nil || len(matches) == 0 {
+		return []string{w}
+	}
+	return matches
+}
+
+func (sh *Shell) homeDir() string {
+	if h := sh.getVar("HOME"); h != "" {
+		return h
+	}
+	u, err := user.Current()
+	if err != nil {
+		return "."
+	}
+	return u.HomeDir
+}
+
+// ---- arithmetic evaluator (simple integer, left-to-right, +−×÷%) ----
+
+func evalArith(sh *Shell, expr string) int64 {
+	expr = strings.TrimSpace(expr)
+	// Expand variables first
+	expr = sh.expandUnquoted(expr)
+	val, err := parseArithExpr(expr)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "posh: arithmetic: %v\n", err)
+		return 0
+	}
+	return val
+}
+
+func parseArithExpr(s string) (int64, error) {
+	s = strings.TrimSpace(s)
+	return parseArithAdd(s)
+}
+
+func parseArithAdd(s string) (int64, error) {
+	// Split on lowest-precedence + and - (respecting parens)
+	depth := 0
+	for i := len(s) - 1; i >= 0; i-- {
+		switch s[i] {
+		case ')':
+			depth++
+		case '(':
+			depth--
+		case '+', '-':
+			if depth == 0 && i > 0 {
+				left, err := parseArithAdd(s[:i])
+				if err != nil {
+					return 0, err
+				}
+				right, err := parseArithMul(s[i+1:])
+				if err != nil {
+					return 0, err
+				}
+				if s[i] == '+' {
+					return left + right, nil
+				}
+				return left - right, nil
+			}
+		}
+	}
+	return parseArithMul(s)
+}
+
+func parseArithMul(s string) (int64, error) {
+	depth := 0
+	for i := len(s) - 1; i >= 0; i-- {
+		switch s[i] {
+		case ')':
+			depth++
+		case '(':
+			depth--
+		case '*', '/', '%':
+			if depth == 0 && i > 0 {
+				left, err := parseArithMul(s[:i])
+				if err != nil {
+					return 0, err
+				}
+				right, err := parseArithAtom(s[i+1:])
+				if err != nil {
+					return 0, err
+				}
+				switch s[i] {
+				case '*':
+					return left * right, nil
+				case '/':
+					if right == 0 {
+						return 0, fmt.Errorf("division by zero")
+					}
+					return left / right, nil
+				case '%':
+					if right == 0 {
+						return 0, fmt.Errorf("division by zero")
+					}
+					return left % right, nil
+				}
+			}
+		}
+	}
+	return parseArithAtom(s)
+}
+
+func parseArithAtom(s string) (int64, error) {
+	s = strings.TrimSpace(s)
+	if strings.HasPrefix(s, "(") && strings.HasSuffix(s, ")") {
+		return parseArithExpr(s[1 : len(s)-1])
+	}
+	if strings.HasPrefix(s, "-") {
+		v, err := parseArithAtom(s[1:])
+		return -v, err
+	}
+	v, err := strconv.ParseInt(s, 0, 64)
+	if err != nil {
+		return 0, fmt.Errorf("invalid number %q", s)
+	}
+	return v, nil
+}
