@@ -307,11 +307,16 @@ func isAssignment(s string) bool {
 	return true
 }
 
-// protectedSpace / protectedTab are Private Use Area sentinels placed around
-// whitespace inside single-quoted strings so word splitting in the evaluator
-// doesn't break them apart. The evaluator strips them after splitting.
-const protectedSpace rune = 0xE001
-const protectedTab   rune = 0xE002
+// Private Use Area sentinels for characters inside single-quoted strings.
+// These survive word splitting and glob expansion unchanged; the evaluator
+// converts them back to their real characters after splitting is done.
+const protectedSpace     rune = 0xE001
+const protectedTab       rune = 0xE002
+const protectedDollar    rune = 0xE003 // prevents variable expansion
+const protectedBackslash rune = 0xE004 // prevents escape processing
+const protectedStar      rune = 0xE005 // prevents glob expansion
+const protectedQuestion  rune = 0xE006 // prevents glob expansion
+const protectedLBracket  rune = 0xE007 // prevents glob expansion
 
 func (l *Lexer) readWord() string {
 	var sb strings.Builder
@@ -326,13 +331,23 @@ func (l *Lexer) readWord() string {
 		switch ch {
 		case '\'':
 			l.advance()
-			// Protect whitespace so word splitting in the evaluator leaves it intact.
+			// Protect special characters so the evaluator treats them as literals.
 			for _, ch := range l.readSingleQuoted() {
 				switch ch {
 				case ' ':
 					sb.WriteRune(protectedSpace)
 				case '\t':
 					sb.WriteRune(protectedTab)
+				case '$':
+					sb.WriteRune(protectedDollar)
+				case '\\':
+					sb.WriteRune(protectedBackslash)
+				case '*':
+					sb.WriteRune(protectedStar)
+				case '?':
+					sb.WriteRune(protectedQuestion)
+				case '[':
+					sb.WriteRune(protectedLBracket)
 				default:
 					sb.WriteRune(ch)
 				}

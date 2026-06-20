@@ -10,14 +10,21 @@ import (
 	"unicode"
 )
 
-// protectedSpace / protectedTab match the sentinels inserted by the lexer for
-// single-quoted and backslash-escaped whitespace. They survive word splitting
-// and are restored to plain whitespace here after splitting is done.
-const protectedSpace rune = 0xE001
-const protectedTab   rune = 0xE002
+// Sentinel runes matching those inserted by the lexer for single-quoted content.
+// They survive word splitting and glob expansion; unprotectWord restores them.
+const protectedSpace     rune = 0xE001
+const protectedTab       rune = 0xE002
+const protectedDollar    rune = 0xE003
+const protectedBackslash rune = 0xE004
+const protectedStar      rune = 0xE005
+const protectedQuestion  rune = 0xE006
+const protectedLBracket  rune = 0xE007
 
 func unprotectWord(s string) string {
-	if !strings.ContainsRune(s, protectedSpace) && !strings.ContainsRune(s, protectedTab) {
+	if !strings.ContainsAny(s, string([]rune{
+		protectedSpace, protectedTab, protectedDollar,
+		protectedBackslash, protectedStar, protectedQuestion, protectedLBracket,
+	})) {
 		return s
 	}
 	var sb strings.Builder
@@ -27,6 +34,16 @@ func unprotectWord(s string) string {
 			sb.WriteByte(' ')
 		case protectedTab:
 			sb.WriteByte('\t')
+		case protectedDollar:
+			sb.WriteByte('$')
+		case protectedBackslash:
+			sb.WriteByte('\\')
+		case protectedStar:
+			sb.WriteByte('*')
+		case protectedQuestion:
+			sb.WriteByte('?')
+		case protectedLBracket:
+			sb.WriteByte('[')
 		default:
 			sb.WriteRune(r)
 		}
@@ -92,8 +109,11 @@ func (sh *Shell) wordSplit(s string) []string {
 // expandWord performs tilde, variable, command-substitution, arithmetic expansion
 // and quote stripping on a single word token.
 func (sh *Shell) expandWord(w string) string {
-	// Fast path: no special chars
-	if !strings.ContainsAny(w, `~$"'\`) {
+	// Fast path: no special chars or sentinels
+	if !strings.ContainsAny(w, `~$"'\`+string([]rune{
+		protectedSpace, protectedTab, protectedDollar,
+		protectedBackslash, protectedStar, protectedQuestion, protectedLBracket,
+	})) {
 		return w
 	}
 
