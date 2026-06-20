@@ -353,7 +353,7 @@ func (c *poshCompleter) varCandidates(prefix string) []string {
 var builtinNames = []string{
 	"cd", "pwd", "echo", "printf", "exit", "export", "unset", "env", "set",
 	"source", ".", "alias", "unalias", "history", "type", "help", "true",
-	"false", ":", "jobs", "fg", "bg", "wait", "kill", "ps", "eval", "test", "[", "break",
+	"false", ":", "jobs", "fg", "bg", "wait", "kill", "ps", "eval", "mkdir", "test", "[", "break",
 	"continue", "return", "read", "shift", "trap", "clear",
 	"ls", "wc", "which", "grep", "egrep", "find", "head", "tail", "less",
 }

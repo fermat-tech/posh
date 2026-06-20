@@ -338,6 +338,7 @@ const protectedQuestion    rune = 0xE006 // prevents glob expansion
 const protectedLBracket    rune = 0xE007 // prevents glob expansion
 const protectedDoubleQuote rune = 0xE008 // prevents double-quote stripping in expandUnquoted
 const protectedLBrace      rune = 0xE009 // prevents brace expansion
+const protectedNewline     rune = 0xE00A // literal newline from $'...' quoting
 
 func (l *Lexer) readWord() string {
 	var sb strings.Builder
@@ -407,29 +408,133 @@ func (l *Lexer) readWord() string {
 			l.readBraceGroup(&sb)
 		case '$':
 			l.advance()
-			sb.WriteRune('$')
 			ch2, ok2 := l.peek()
-			if !ok2 {
-				break
+			if ok2 && ch2 == '\'' {
+				// ANSI-C quoting: $'...' — escape sequences become literal chars
+				l.advance() // consume '
+				l.readAnsiCQuoted(&sb)
+			} else {
+				sb.WriteRune('$')
+				if !ok2 {
+					break
+				}
+				if ch2 == '(' {
+					// $(...) command substitution or $((...)) arithmetic — read to matching )
+					l.advance()
+					sb.WriteByte('(')
+					l.readNestedParens(&sb)
+				} else if ch2 == '{' {
+					// ${...} variable substitution — read to matching }
+					l.advance()
+					sb.WriteByte('{')
+					l.readUntilClose('{', '}', &sb)
+				}
+				// else: $VAR — variable name will be read as ordinary chars in next iterations
 			}
-			if ch2 == '(' {
-				// $(...) command substitution or $((...)) arithmetic — read to matching )
-				l.advance()
-				sb.WriteByte('(')
-				l.readNestedParens(&sb)
-			} else if ch2 == '{' {
-				// ${...} variable substitution — read to matching }
-				l.advance()
-				sb.WriteByte('{')
-				l.readUntilClose('{', '}', &sb)
-			}
-			// else: $VAR — variable name will be read as ordinary chars in next iterations
 		default:
 			l.advance()
 			sb.WriteRune(ch)
 		}
 	}
 	return sb.String()
+}
+
+// readAnsiCQuoted reads the body of a $'...' string (opening ' already consumed),
+// converting ANSI-C escape sequences to their literal character values.
+// All characters are protected with sentinels so word-splitting and glob expansion
+// treat them as quoted literals.
+func (l *Lexer) readAnsiCQuoted(sb *strings.Builder) {
+	for {
+		ch, ok := l.peek()
+		if !ok || ch == '\'' {
+			if ok {
+				l.advance()
+			}
+			break
+		}
+		l.advance()
+		if ch != '\\' {
+			l.protectRune(sb, ch)
+			continue
+		}
+		// Backslash escape
+		next, ok2 := l.peek()
+		if !ok2 {
+			sb.WriteRune(protectedBackslash)
+			break
+		}
+		l.advance()
+		switch next {
+		case 'n':
+			sb.WriteRune(protectedNewline)
+		case 't':
+			sb.WriteRune(protectedTab)
+		case 'r':
+			sb.WriteByte('\r')
+		case 'a':
+			sb.WriteByte('\a')
+		case 'b':
+			sb.WriteByte('\b')
+		case 'v':
+			sb.WriteByte('\v')
+		case 'f':
+			sb.WriteByte('\f')
+		case 'e', 'E':
+			sb.WriteByte(0x1B) // ESC
+		case '\\':
+			sb.WriteRune(protectedBackslash)
+		case '\'':
+			sb.WriteByte('\'')
+		case '"':
+			sb.WriteRune(protectedDoubleQuote)
+		case ' ':
+			sb.WriteRune(protectedSpace)
+		case '0', '1', '2', '3', '4', '5', '6', '7':
+			// Octal: \0NNN — up to 3 digits
+			val := int(next - '0')
+			for i := 0; i < 2; i++ {
+				d, ok3 := l.peek()
+				if !ok3 || d < '0' || d > '7' {
+					break
+				}
+				l.advance()
+				val = val*8 + int(d-'0')
+			}
+			sb.WriteRune(rune(val))
+		default:
+			sb.WriteRune(protectedBackslash)
+			sb.WriteRune(next)
+		}
+	}
+}
+
+// protectRune writes ch with the appropriate sentinel if it needs to be
+// protected from word-splitting or glob expansion.
+func (l *Lexer) protectRune(sb *strings.Builder, ch rune) {
+	switch ch {
+	case ' ':
+		sb.WriteRune(protectedSpace)
+	case '\t':
+		sb.WriteRune(protectedTab)
+	case '\n':
+		sb.WriteRune(protectedNewline)
+	case '$':
+		sb.WriteRune(protectedDollar)
+	case '\\':
+		sb.WriteRune(protectedBackslash)
+	case '*':
+		sb.WriteRune(protectedStar)
+	case '?':
+		sb.WriteRune(protectedQuestion)
+	case '[':
+		sb.WriteRune(protectedLBracket)
+	case '"':
+		sb.WriteRune(protectedDoubleQuote)
+	case '{':
+		sb.WriteRune(protectedLBrace)
+	default:
+		sb.WriteRune(ch)
+	}
 }
 
 // readBraceGroup reads from after the opening { up to and including the matching }.

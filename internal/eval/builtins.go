@@ -62,6 +62,7 @@ func init() {
 		"kill":    builtinKill,
 		"ps":      builtinPs,
 		"eval":    builtinEval,
+		"mkdir":   builtinMkdir,
 	}
 }
 
@@ -166,16 +167,107 @@ func builtinPrintf(_ *Shell, args []string, _ io.Reader, stdout, stderr io.Write
 		fmt.Fprintf(stderr, "printf: missing format string\n")
 		return 1
 	}
-	format := args[0]
-	fmtArgs := make([]any, len(args)-1)
-	for i, a := range args[1:] {
-		fmtArgs[i] = a
-	}
-	format = strings.ReplaceAll(format, `\n`, "\n")
-	format = strings.ReplaceAll(format, `\t`, "\t")
-	format = strings.ReplaceAll(format, `\r`, "\r")
-	fmt.Fprintf(stdout, format, fmtArgs...)
+	out := shellPrintfFormat(args[0], args[1:])
+	io.WriteString(stdout, out)
 	return 0
+}
+
+// shellPrintfFormat implements shell-compatible printf formatting.
+// Handles %s %d %i %f %b %% and backslash escapes \n \t \r \\ \a \b \v \0NNN.
+func shellPrintfFormat(format string, args []string) string {
+	var sb strings.Builder
+	runes := []rune(unescapeShellString(format))
+	argIdx := 0
+	i := 0
+	for i < len(runes) {
+		ch := runes[i]
+		if ch != '%' {
+			sb.WriteRune(ch)
+			i++
+			continue
+		}
+		i++
+		if i >= len(runes) {
+			sb.WriteByte('%')
+			break
+		}
+		spec := runes[i]
+		i++
+		var arg string
+		if argIdx < len(args) {
+			arg = args[argIdx]
+			argIdx++
+		}
+		switch spec {
+		case 's':
+			sb.WriteString(arg)
+		case 'd', 'i':
+			n, _ := strconv.ParseInt(strings.TrimSpace(arg), 0, 64)
+			fmt.Fprintf(&sb, "%d", n)
+		case 'f':
+			f, _ := strconv.ParseFloat(strings.TrimSpace(arg), 64)
+			fmt.Fprintf(&sb, "%f", f)
+		case 'b':
+			// %b: like %s but also processes backslash escapes in the argument
+			sb.WriteString(unescapeShellString(arg))
+		case '%':
+			sb.WriteByte('%')
+			argIdx-- // %% consumes no argument
+		default:
+			sb.WriteByte('%')
+			sb.WriteRune(spec)
+		}
+	}
+	return sb.String()
+}
+
+// unescapeShellString processes backslash escape sequences in a string.
+func unescapeShellString(s string) string {
+	if !strings.ContainsRune(s, '\\') {
+		return s
+	}
+	var sb strings.Builder
+	runes := []rune(s)
+	i := 0
+	for i < len(runes) {
+		if runes[i] != '\\' || i+1 >= len(runes) {
+			sb.WriteRune(runes[i])
+			i++
+			continue
+		}
+		i++ // skip backslash
+		switch runes[i] {
+		case 'n':
+			sb.WriteByte('\n')
+		case 't':
+			sb.WriteByte('\t')
+		case 'r':
+			sb.WriteByte('\r')
+		case '\\':
+			sb.WriteByte('\\')
+		case 'a':
+			sb.WriteByte('\a')
+		case 'b':
+			sb.WriteByte('\b')
+		case 'v':
+			sb.WriteByte('\v')
+		case '0':
+			// \0NNN — octal
+			j := i + 1
+			for j < i+4 && j < len(runes) && runes[j] >= '0' && runes[j] <= '7' {
+				j++
+			}
+			n, _ := strconv.ParseInt(string(runes[i+1:j]), 8, 32)
+			sb.WriteRune(rune(n))
+			i = j
+			continue
+		default:
+			sb.WriteByte('\\')
+			sb.WriteRune(runes[i])
+		}
+		i++
+	}
+	return sb.String()
 }
 
 // ---- exit ----
@@ -443,6 +535,7 @@ Built-in commands:
   kill [-sig] pid|%n  Send signal to process or job (kill -l lists signals)
   ps [-f] [-p pid]    List processes (-f shows PPID, -p filters by PID)
   eval [args]         Evaluate args as a shell command in the current shell
+  mkdir [-p] dir...   Create directories (-p creates parents, no error if exists)
   test EXPR / [ EXPR ] Evaluate conditional expression
   break [n]           Break from n levels of loop
   continue [n]        Continue next iteration of loop
@@ -648,6 +741,41 @@ func builtinKill(sh *Shell, args []string, _ io.Reader, stdout, stderr io.Writer
 }
 
 // ---- eval ----
+
+// ---- mkdir ----
+
+func builtinMkdir(_ *Shell, args []string, _ io.Reader, _, stderr io.Writer) int {
+	parents := false
+	dirs := args[:0]
+	for _, a := range args {
+		if a == "-p" {
+			parents = true
+		} else if a == "--" {
+			dirs = append(dirs, args[len(dirs)+1:]...)
+			break
+		} else {
+			dirs = append(dirs, a)
+		}
+	}
+	if len(dirs) == 0 {
+		fmt.Fprintf(stderr, "mkdir: missing operand\n")
+		return 1
+	}
+	code := 0
+	for _, d := range dirs {
+		var err error
+		if parents {
+			err = os.MkdirAll(d, 0o755)
+		} else {
+			err = os.Mkdir(d, 0o755)
+		}
+		if err != nil {
+			fmt.Fprintf(stderr, "mkdir: %s: %v\n", d, err)
+			code = 1
+		}
+	}
+	return code
+}
 
 func builtinEval(sh *Shell, args []string, _ io.Reader, _, _ io.Writer) int {
 	if len(args) == 0 {
