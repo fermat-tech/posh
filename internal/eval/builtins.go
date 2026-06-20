@@ -61,6 +61,7 @@ func init() {
 		"wait":    builtinWait,
 		"kill":    builtinKill,
 		"ps":      builtinPs,
+		"eval":    builtinEval,
 	}
 }
 
@@ -441,6 +442,7 @@ Built-in commands:
   wait [%n|pid]       Wait for job/process
   kill [-sig] pid|%n  Send signal to process or job (kill -l lists signals)
   ps [-f] [-p pid]    List processes (-f shows PPID, -p filters by PID)
+  eval [args]         Evaluate args as a shell command in the current shell
   test EXPR / [ EXPR ] Evaluate conditional expression
   break [n]           Break from n levels of loop
   continue [n]        Continue next iteration of loop
@@ -643,6 +645,19 @@ func builtinKill(sh *Shell, args []string, _ io.Reader, stdout, stderr io.Writer
 		}
 	}
 	return code
+}
+
+// ---- eval ----
+
+func builtinEval(sh *Shell, args []string, _ io.Reader, _, _ io.Writer) int {
+	if len(args) == 0 {
+		return 0
+	}
+	// Restore any sentinels (protectedBackslash, protectedSpace, etc.) that were
+	// introduced by single-quote processing, so the re-evaluated string contains
+	// real shell characters rather than private-use-area placeholders.
+	cmd := unprotectWord(strings.Join(args, " "))
+	return sh.EvalString(cmd)
 }
 
 func parseJobID(s string) int {

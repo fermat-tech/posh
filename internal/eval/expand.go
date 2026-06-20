@@ -12,18 +12,21 @@ import (
 
 // Sentinel runes matching those inserted by the lexer for single-quoted content.
 // They survive word splitting and glob expansion; unprotectWord restores them.
-const protectedSpace     rune = 0xE001
-const protectedTab       rune = 0xE002
-const protectedDollar    rune = 0xE003
-const protectedBackslash rune = 0xE004
-const protectedStar      rune = 0xE005
-const protectedQuestion  rune = 0xE006
-const protectedLBracket  rune = 0xE007
+const protectedSpace       rune = 0xE001
+const protectedTab         rune = 0xE002
+const protectedDollar      rune = 0xE003
+const protectedBackslash   rune = 0xE004
+const protectedStar        rune = 0xE005
+const protectedQuestion    rune = 0xE006
+const protectedLBracket    rune = 0xE007
+const protectedDoubleQuote rune = 0xE008
+const protectedLBrace      rune = 0xE009
 
 func unprotectWord(s string) string {
 	if !strings.ContainsAny(s, string([]rune{
 		protectedSpace, protectedTab, protectedDollar,
 		protectedBackslash, protectedStar, protectedQuestion, protectedLBracket,
+		protectedDoubleQuote, protectedLBrace,
 	})) {
 		return s
 	}
@@ -44,6 +47,10 @@ func unprotectWord(s string) string {
 			sb.WriteByte('?')
 		case protectedLBracket:
 			sb.WriteByte('[')
+		case protectedDoubleQuote:
+			sb.WriteByte('"')
+		case protectedLBrace:
+			sb.WriteByte('{')
 		default:
 			sb.WriteRune(r)
 		}
@@ -124,6 +131,7 @@ func (sh *Shell) expandWord(w string) string {
 	if !strings.ContainsAny(w, `~$"'\`+string([]rune{
 		protectedSpace, protectedTab, protectedDollar,
 		protectedBackslash, protectedStar, protectedQuestion, protectedLBracket,
+		protectedDoubleQuote, protectedLBrace,
 	})) {
 		return w
 	}

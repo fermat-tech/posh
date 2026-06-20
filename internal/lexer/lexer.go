@@ -329,13 +329,15 @@ func isAssignment(s string) bool {
 // Private Use Area sentinels for characters inside single-quoted strings.
 // These survive word splitting and glob expansion unchanged; the evaluator
 // converts them back to their real characters after splitting is done.
-const protectedSpace     rune = 0xE001
-const protectedTab       rune = 0xE002
-const protectedDollar    rune = 0xE003 // prevents variable expansion
-const protectedBackslash rune = 0xE004 // prevents escape processing
-const protectedStar      rune = 0xE005 // prevents glob expansion
-const protectedQuestion  rune = 0xE006 // prevents glob expansion
-const protectedLBracket  rune = 0xE007 // prevents glob expansion
+const protectedSpace       rune = 0xE001
+const protectedTab         rune = 0xE002
+const protectedDollar      rune = 0xE003 // prevents variable expansion
+const protectedBackslash   rune = 0xE004 // prevents escape processing
+const protectedStar        rune = 0xE005 // prevents glob expansion
+const protectedQuestion    rune = 0xE006 // prevents glob expansion
+const protectedLBracket    rune = 0xE007 // prevents glob expansion
+const protectedDoubleQuote rune = 0xE008 // prevents double-quote stripping in expandUnquoted
+const protectedLBrace      rune = 0xE009 // prevents brace expansion
 
 func (l *Lexer) readWord() string {
 	var sb strings.Builder
@@ -361,6 +363,10 @@ func (l *Lexer) readWord() string {
 					sb.WriteRune(protectedDollar)
 				case '\\':
 					sb.WriteRune(protectedBackslash)
+				case '"':
+					sb.WriteRune(protectedDoubleQuote)
+				case '{':
+					sb.WriteRune(protectedLBrace)
 				case '*':
 					sb.WriteRune(protectedStar)
 				case '?':
