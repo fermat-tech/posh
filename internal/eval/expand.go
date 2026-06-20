@@ -139,10 +139,15 @@ func (sh *Shell) expandWord(w string) string {
 		return w
 	}
 
-	// Handle double-quoted string (stored with leading/trailing " sentinels by lexer)
+	// Handle double-quoted string (stored with leading/trailing " sentinels by lexer).
+	// Only treat as a pure double-quoted string if the inner content has no raw "
+	// (which would indicate adjacent quoted groups like "a""b" concatenated by the lexer).
 	if strings.HasPrefix(w, `"`) && strings.HasSuffix(w, `"`) && len(w) >= 2 {
 		inner := w[1 : len(w)-1]
-		return sh.expandInsideDoubleQuotes(inner)
+		if !strings.ContainsRune(inner, '"') {
+			return sh.expandInsideDoubleQuotes(inner)
+		}
+		// Fall through to expandUnquoted which handles each "..." segment separately.
 	}
 
 	// Handle tilde at start (bare, unquoted)
