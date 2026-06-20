@@ -82,6 +82,7 @@ type viState struct {
 	lastFSet       bool
 	completer      completeFn
 	lastTabBuf     string // line at the last Tab press (for double-Tab detection)
+	originCol      int    // cursor column where the prompt was first drawn
 }
 
 // viReadLine reads one line using the vi-mode editor.
@@ -103,6 +104,7 @@ func viReadLine(prompt string, history []string, completer completeFn) (string, 
 		histIdx:   len(history),
 		mode:      viInsert,
 		completer: completer,
+		originCol: cursorColumn(),
 	}
 	vs.redraw()
 
@@ -565,9 +567,10 @@ func (vs *viState) redraw() {
 	promptVW := visibleLen(vs.prompt)
 	currentLen := promptVW + len(vs.buf)
 
+	// Return to the column where this prompt started, then rewrite.
+	setCursorX(vs.originCol)
+
 	var sb strings.Builder
-	// Go to column 0 and rewrite the whole line.
-	sb.WriteByte('\r')
 	sb.WriteString(vs.prompt)
 	sb.WriteString(string(vs.buf))
 

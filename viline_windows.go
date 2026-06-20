@@ -9,11 +9,45 @@ import (
 )
 
 var (
-	kernel32              = syscall.NewLazyDLL("kernel32.dll")
-	procGetConsoleMode    = kernel32.NewProc("GetConsoleMode")
-	procSetConsoleMode    = kernel32.NewProc("SetConsoleMode")
-	procReadConsoleInputW = kernel32.NewProc("ReadConsoleInputW")
+	kernel32                       = syscall.NewLazyDLL("kernel32.dll")
+	procGetConsoleMode             = kernel32.NewProc("GetConsoleMode")
+	procSetConsoleMode             = kernel32.NewProc("SetConsoleMode")
+	procReadConsoleInputW          = kernel32.NewProc("ReadConsoleInputW")
+	procGetConsoleScreenBufferInfo = kernel32.NewProc("GetConsoleScreenBufferInfo")
+	procSetConsoleCursorPosition   = kernel32.NewProc("SetConsoleCursorPosition")
+	procGetStdHandle               = kernel32.NewProc("GetStdHandle")
 )
+
+type viCoord struct{ x, y int16 }
+
+type viConsoleScreenBufferInfo struct {
+	size       viCoord
+	cursorPos  viCoord
+	attributes uint16
+	window     [4]int16
+	maxSize    viCoord
+}
+
+func stdoutHandle() syscall.Handle {
+	h, _, _ := procGetStdHandle.Call(uintptr(0xFFFFFFF5)) // STD_OUTPUT_HANDLE
+	return syscall.Handle(h)
+}
+
+// cursorColumn returns the current cursor X position (0-based).
+func cursorColumn() int {
+	var info viConsoleScreenBufferInfo
+	procGetConsoleScreenBufferInfo.Call(uintptr(stdoutHandle()), uintptr(unsafe.Pointer(&info)))
+	return int(info.cursorPos.x)
+}
+
+// setCursorX moves the cursor to column x on the current row (0-based).
+func setCursorX(x int) {
+	var info viConsoleScreenBufferInfo
+	h := stdoutHandle()
+	procGetConsoleScreenBufferInfo.Call(uintptr(h), uintptr(unsafe.Pointer(&info)))
+	pos := uint32(uint16(x)) | uint32(uint16(info.cursorPos.y))<<16
+	procSetConsoleCursorPosition.Call(uintptr(h), uintptr(pos))
+}
 
 const (
 	enableProcessedInput         = 0x0001 // when set, Ctrl+C → SIGINT; we clear it so it arrives as a key event
