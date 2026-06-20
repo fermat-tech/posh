@@ -148,6 +148,7 @@ func runREPL(sh *eval.Shell) {
 		}
 		sh.History = append(sh.History, input)
 		sh.EvalString(input)
+		os.Stdout.Sync()
 	}
 }
 
