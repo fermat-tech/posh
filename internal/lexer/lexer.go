@@ -597,7 +597,15 @@ func (l *Lexer) readDoubleQuoted() string {
 			switch next {
 			case '"', '\\', '$', '`', '\n':
 				l.advance()
-				if next != '\n' {
+				switch next {
+				case '\n': // line continuation — discard
+				case '"':
+					sb.WriteRune(protectedDoubleQuote)
+				case '\\':
+					sb.WriteRune(protectedBackslash)
+				case '$':
+					sb.WriteRune(protectedDollar)
+				default: // '`'
 					sb.WriteRune(next)
 				}
 			default:
