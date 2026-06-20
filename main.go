@@ -124,7 +124,7 @@ func runREPL(sh *eval.Shell) {
 
 		if sh.GetOpt("vi") {
 			closeLiner() // release terminal if we just switched from emacs
-			input, err = viReadMultiLine(sh)
+			input, err = viReadMultiLine(sh, c.Complete)
 		} else {
 			openLiner() // acquire terminal if we just switched from vi
 			input, err = linerReadMultiLine(rl, sh)
@@ -175,14 +175,14 @@ func linerReadMultiLine(rl *liner.State, sh *eval.Shell) (string, error) {
 }
 
 // viReadMultiLine reads one complete command using the vi-mode editor.
-func viReadMultiLine(sh *eval.Shell) (string, error) {
+func viReadMultiLine(sh *eval.Shell, completer completeFn) (string, error) {
 	var lines []string
 	for {
 		prompt := buildPrompt(sh)
 		if len(lines) > 0 {
 			prompt = "> "
 		}
-		line, err := viReadLine(prompt, sh.History)
+		line, err := viReadLine(prompt, sh.History, completer)
 		if err != nil {
 			if len(lines) == 0 {
 				return "", err
@@ -251,29 +251,96 @@ type poshCompleter struct {
 	sh *eval.Shell
 }
 
+// findWordStart scans head left-to-right respecting quotes and returns the
+// start index of the current (last) word and the open-quote character if the
+// word started with an unmatched " or '.  A zero openQuote means the word is
+// unquoted or the quote was already closed.
+func findWordStart(head string) (start int, openQuote rune) {
+	runes := []rune(head)
+	n := len(runes)
+	wordStart := 0
+	var oq rune
+	i := 0
+	for i < n {
+		ch := runes[i]
+		switch {
+		case ch == ' ' || ch == '\t' || ch == '|' || ch == '&' || ch == ';' || ch == '(':
+			i++
+			wordStart = i
+			oq = 0
+		case ch == '"' || ch == '\'':
+			wordStart = i
+			oq = ch
+			i++
+			for i < n && runes[i] != ch {
+				i++
+			}
+			if i < n { // found matching close quote — word finished cleanly
+				i++
+				oq = 0
+			}
+			// if i >= n the quote is still open; oq stays set
+		default:
+			i++
+		}
+	}
+	return wordStart, oq
+}
+
 func (c *poshCompleter) Complete(line string, pos int) (string, []string, string) {
 	head := line[:pos]
 	tail := line[pos:]
-	wordStart := strings.LastIndexAny(head, " \t|&;(") + 1
+
+	wordStart, openQuote := findWordStart(head)
 	prefix := head[wordStart:]
-	isFirstWord := strings.TrimSpace(head[:wordStart]) == "" ||
-		strings.ContainsAny(strings.TrimRight(head[:wordStart], " \t"), "|&;(")
 
-	var candidates []string
-	if isFirstWord {
-		candidates = c.commandCandidates(prefix)
-	} else {
-		candidates = c.fileCandidates(prefix)
-	}
-	sort.Strings(candidates)
-
-	var completions []string
-	for _, cand := range candidates {
-		if strings.HasPrefix(cand, prefix) {
-			completions = append(completions, cand)
+	// Strip surrounding quotes so matching works on the raw path/word.
+	rawPrefix := prefix
+	if len(rawPrefix) > 0 && (rawPrefix[0] == '"' || rawPrefix[0] == '\'') {
+		rawPrefix = rawPrefix[1:]
+		if len(rawPrefix) > 0 && rawPrefix[len(rawPrefix)-1] == prefix[0] {
+			rawPrefix = rawPrefix[:len(rawPrefix)-1]
 		}
 	}
+
+	before := strings.TrimRight(head[:wordStart], " \t")
+	isFirstWord := before == "" || (len(before) > 0 &&
+		strings.ContainsAny(string([]rune(before)[len([]rune(before))-1:]), "|&;("))
+
+	var completions []string
+	switch {
+	case strings.HasPrefix(rawPrefix, "$") && !strings.ContainsAny(rawPrefix, "/\\"):
+		completions = c.varCandidates(rawPrefix)
+	case isFirstWord && openQuote == 0:
+		completions = c.commandCandidates(rawPrefix)
+	default:
+		completions = c.fileCandidates(rawPrefix)
+	}
+	sort.Strings(completions)
+	// head returned to caller excludes the opening quote; doComplete / liner
+	// will re-add quotes around the chosen completion as needed.
 	return head[:wordStart], completions, tail
+}
+
+func (c *poshCompleter) varCandidates(prefix string) []string {
+	varPrefix := strings.ToLower(prefix[1:]) // strip leading $
+	var out []string
+	seen := make(map[string]bool)
+	for k := range c.sh.Vars() {
+		if strings.HasPrefix(strings.ToLower(k), varPrefix) && !seen[k] {
+			seen[k] = true
+			out = append(out, "$"+k)
+		}
+	}
+	// Also include exported OS env vars
+	for _, kv := range os.Environ() {
+		k := strings.SplitN(kv, "=", 2)[0]
+		if strings.HasPrefix(strings.ToLower(k), varPrefix) && !seen[k] {
+			seen[k] = true
+			out = append(out, "$"+k)
+		}
+	}
+	return out
 }
 
 var builtinNames = []string{
@@ -323,34 +390,37 @@ func (c *poshCompleter) commandCandidates(prefix string) []string {
 }
 
 func (c *poshCompleter) fileCandidates(prefix string) []string {
-	dir := filepath.Dir(prefix)
-	base := filepath.Base(prefix)
-	if prefix == "" || strings.HasSuffix(prefix, "/") || strings.HasSuffix(prefix, "\\") {
-		dir = prefix
-		base = ""
+	// Split prefix into directory and base parts at the last path separator.
+	var dirPart, basePart string
+	lastSep := strings.LastIndexAny(prefix, "/\\")
+	if lastSep >= 0 {
+		dirPart = prefix[:lastSep+1]
+		basePart = prefix[lastSep+1:]
+	} else {
+		dirPart = ""
+		basePart = prefix
 	}
 
-	entries, err := os.ReadDir(dir)
+	// Expand variables in the directory part so $VAR/path works.
+	expandedDir := c.sh.ExpandWord(strings.TrimRight(dirPart, "/\\"))
+	if expandedDir == "" {
+		expandedDir = "."
+	}
+
+	entries, err := os.ReadDir(expandedDir)
 	if err != nil {
-		entries, err = os.ReadDir(".")
-		if err != nil {
-			return nil
-		}
-		dir = "."
+		return nil
 	}
 
 	var out []string
 	for _, e := range entries {
 		name := e.Name()
-		if !strings.HasPrefix(strings.ToLower(name), strings.ToLower(base)) {
+		if !strings.HasPrefix(strings.ToLower(name), strings.ToLower(basePart)) {
 			continue
 		}
-		candidate := filepath.Join(dir, name)
-		if dir == "." && !strings.Contains(prefix, "/") && !strings.Contains(prefix, "\\") {
-			candidate = name
-		}
+		candidate := dirPart + name
 		if e.IsDir() {
-			candidate += string(os.PathSeparator)
+			candidate += "/"
 		}
 		out = append(out, candidate)
 	}

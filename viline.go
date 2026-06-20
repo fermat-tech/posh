@@ -33,6 +33,7 @@ const (
 	keyCtrlK
 	keyEOF
 	keyInterrupt
+	keyTab
 )
 
 type keyEvent struct {
@@ -63,6 +64,9 @@ const (
 	viNormal
 )
 
+// completeFn mirrors the liner WordCompleter signature.
+type completeFn func(line string, pos int) (head string, completions []string, tail string)
+
 type viState struct {
 	buf            []rune
 	pos            int
@@ -76,11 +80,13 @@ type viState struct {
 	lastFChar      rune
 	lastFForward   bool // true = f (forward), false = F (backward)
 	lastFSet       bool
+	completer      completeFn
+	lastTabBuf     string // line at the last Tab press (for double-Tab detection)
 }
 
 // viReadLine reads one line using the vi-mode editor.
 // consoleRawMode and readKey are implemented in viline_windows.go.
-func viReadLine(prompt string, history []string) (string, error) {
+func viReadLine(prompt string, history []string, completer completeFn) (string, error) {
 	restore, err := consoleRawMode()
 	if err != nil {
 		// fallback: plain input
@@ -92,10 +98,11 @@ func viReadLine(prompt string, history []string) (string, error) {
 	defer restore()
 
 	vs := &viState{
-		prompt:  prompt,
-		history: append([]string(nil), history...),
-		histIdx: len(history),
-		mode:    viInsert,
+		prompt:    prompt,
+		history:   append([]string(nil), history...),
+		histIdx:   len(history),
+		mode:      viInsert,
+		completer: completer,
 	}
 	vs.redraw()
 
@@ -176,12 +183,74 @@ func (vs *viState) handleInsert(key keyEvent) (done bool, line string, err error
 	case keyCtrlK:
 		vs.yank = append([]rune(nil), vs.buf[vs.pos:]...)
 		vs.buf = vs.buf[:vs.pos]
+	case keyTab:
+		vs.doComplete()
+		return false, "", nil
 	case keyRune:
 		vs.buf = append(vs.buf[:vs.pos], append([]rune{key.r}, vs.buf[vs.pos:]...)...)
 		vs.pos++
 	}
 	vs.redraw()
 	return false, "", nil
+}
+
+func (vs *viState) doComplete() {
+	if vs.completer == nil {
+		return
+	}
+	line := string(vs.buf)
+	head, completions, _ := vs.completer(line, vs.pos)
+	if len(completions) == 0 {
+		return
+	}
+
+	if len(completions) == 1 {
+		word := completions[0]
+		if strings.Contains(word, " ") {
+			word = `"` + word + `"`
+		}
+		newLine := head + word
+		if !strings.HasSuffix(word, "/") && !strings.HasSuffix(word, "/\"") {
+			newLine += " "
+		}
+		vs.buf = []rune(newLine)
+		vs.pos = len(vs.buf)
+		vs.lastTabBuf = ""
+		vs.redraw()
+		return
+	}
+
+	common := viCommonPrefix(completions)
+	newLine := head + common
+	showList := string(vs.buf) == vs.lastTabBuf // second Tab with no change → list
+	vs.buf = []rune(newLine)
+	vs.pos = len(vs.buf)
+	vs.lastTabBuf = string(vs.buf)
+
+	if showList || common == string([]rune(line)[len([]rune(head)):vs.pos]) {
+		fmt.Fprintf(os.Stdout, "\r\n")
+		for _, c := range completions {
+			fmt.Fprintf(os.Stdout, "%s\r\n", c)
+		}
+		vs.lastDisplayLen = 0
+	}
+	vs.redraw()
+}
+
+func viCommonPrefix(strs []string) string {
+	if len(strs) == 0 {
+		return ""
+	}
+	prefix := strs[0]
+	for _, s := range strs[1:] {
+		for !strings.HasPrefix(strings.ToLower(s), strings.ToLower(prefix)) {
+			if len(prefix) == 0 {
+				return ""
+			}
+			prefix = prefix[:len(prefix)-1]
+		}
+	}
+	return prefix
 }
 
 // ---- normal mode ----

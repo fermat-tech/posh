@@ -26,6 +26,7 @@ const (
 	keyEventType = 0x0001
 
 	vkBack    = 0x08
+	vkTab     = 0x09
 	vkReturn  = 0x0D
 	vkEscape  = 0x1B
 	vkEnd     = 0x23
@@ -131,6 +132,8 @@ func readKey() (keyEvent, error) {
 		}
 
 		switch ke.wVirtualKeyCode {
+		case vkTab:
+			return keyEvent{typ: keyTab}, nil
 		case vkReturn:
 			return keyEvent{typ: keyEnter}, nil
 		case vkEscape:

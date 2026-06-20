@@ -70,6 +70,18 @@ func New(name string) *Shell {
 
 // GetVar is the exported accessor for use outside the package.
 func (sh *Shell) GetVar(name string) string { return sh.getVar(name) }
+
+// ExpandWord is the exported version of expandWord, used by tab completion.
+func (sh *Shell) ExpandWord(w string) string { return sh.expandWord(w) }
+
+// Vars returns a snapshot of all shell variable names (for tab completion).
+func (sh *Shell) Vars() map[string]string {
+	out := make(map[string]string, len(sh.vars))
+	for k, v := range sh.vars {
+		out[k] = v
+	}
+	return out
+}
 func (sh *Shell) GetOpt(name string) bool   { return sh.opts[name] }
 func (sh *Shell) SetOpt(name string, val bool) {
 	if val {
