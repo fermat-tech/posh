@@ -27,27 +27,6 @@ func init() {
 var colorStdout = colorable.NewColorableStdout()
 var colorStderr = colorable.NewColorableStderr()
 
-// trackingWriter wraps a writer and remembers the last byte written.
-// Used to detect whether output ended with a newline before showing the prompt.
-type trackingWriter struct {
-	io.Writer
-	lastByte  byte
-	hasOutput bool
-}
-
-func (t *trackingWriter) Write(p []byte) (int, error) {
-	n, err := t.Writer.Write(p)
-	if n > 0 {
-		t.lastByte = p[n-1]
-		t.hasOutput = true
-	}
-	return n, err
-}
-
-func (t *trackingWriter) atLineStart() bool {
-	return !t.hasOutput || t.lastByte == '\n'
-}
-
 func main() {
 	args := os.Args[1:]
 	sh := eval.New(progName)
@@ -76,10 +55,6 @@ func main() {
 }
 
 func runREPL(sh *eval.Shell) {
-	// Wrap stdout so we can detect whether output ended on a new line.
-	tracker := &trackingWriter{Writer: colorStdout}
-	sh.Stdout = tracker
-
 	// Source ~/.poshrc
 	home, _ := os.UserHomeDir()
 	rcPath := filepath.Join(home, ".poshrc")
@@ -173,11 +148,6 @@ func runREPL(sh *eval.Shell) {
 		}
 		sh.History = append(sh.History, input)
 		sh.EvalString(input)
-		// If output didn't end with a newline, print one so the next prompt
-		// isn't drawn on the same line (liner does \r before printing the prompt).
-		if !tracker.atLineStart() {
-			fmt.Fprintln(tracker)
-		}
 	}
 }
 
