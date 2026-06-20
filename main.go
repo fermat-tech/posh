@@ -302,8 +302,6 @@ func (c *poshCompleter) Complete(line string, pos int) (string, []string, string
 			rawPrefix = rawPrefix[:len(rawPrefix)-1]
 		}
 	}
-	// Trim trailing whitespace left over from inside quotes (e.g. "$HOME/W ").
-	rawPrefix = strings.TrimRight(rawPrefix, " \t")
 
 	before := strings.TrimRight(head[:wordStart], " \t")
 	isFirstWord := before == "" || (len(before) > 0 &&
@@ -317,6 +315,13 @@ func (c *poshCompleter) Complete(line string, pos int) (string, []string, string
 		completions = c.commandCandidates(rawPrefix)
 	default:
 		completions = c.fileCandidates(rawPrefix)
+		// If trailing whitespace yielded no matches, retry without it.
+		if len(completions) == 0 {
+			trimmed := strings.TrimRight(rawPrefix, " \t")
+			if trimmed != rawPrefix {
+				completions = c.fileCandidates(trimmed)
+			}
+		}
 	}
 	sort.Strings(completions)
 	// head returned to caller excludes the opening quote; doComplete / liner
