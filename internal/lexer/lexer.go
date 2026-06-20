@@ -181,9 +181,28 @@ func (l *Lexer) Tokenize() []Token {
 			wordPos = false
 
 		case ch == '{':
-			l.advance()
-			tokens = append(tokens, Token{Type: LBRACE})
-			wordPos = false
+			// Emit LBRACE only when { is standalone (followed by whitespace/EOF).
+			// When { is adjacent to word chars it starts a brace expression and is
+			// read as part of the word by readWord.
+			next, hasNext := l.peekAt(1)
+			standalone := !hasNext || next == ' ' || next == '\t' || next == '\r' || next == '\n'
+			if standalone {
+				l.advance()
+				tokens = append(tokens, Token{Type: LBRACE})
+				wordPos = false
+			} else {
+				w := l.readWord()
+				if !wordPos && isAssignment(w) {
+					tokens = append(tokens, Token{Type: ASSIGN, Val: w})
+				} else {
+					tokens = append(tokens, Token{Type: WORD, Val: w})
+					wordPos = true
+					switch w {
+					case "do", "then", "else", "elif":
+						wordPos = false
+					}
+				}
+			}
 
 		case ch == '}':
 			l.advance()
@@ -375,6 +394,11 @@ func (l *Lexer) readWord() string {
 					sb.WriteRune(next)
 				}
 			}
+		case '{':
+			// Brace group mid-word: consume everything up to the matching }.
+			l.advance()
+			sb.WriteRune('{')
+			l.readBraceGroup(&sb)
 		case '$':
 			l.advance()
 			sb.WriteRune('$')
@@ -400,6 +424,26 @@ func (l *Lexer) readWord() string {
 		}
 	}
 	return sb.String()
+}
+
+// readBraceGroup reads from after the opening { up to and including the matching }.
+// Used so that {a,b} and file{1..5}.txt are kept as single word tokens.
+func (l *Lexer) readBraceGroup(sb *strings.Builder) {
+	depth := 1
+	for depth > 0 {
+		ch, ok := l.peek()
+		if !ok {
+			break
+		}
+		l.advance()
+		switch ch {
+		case '{':
+			depth++
+		case '}':
+			depth--
+		}
+		sb.WriteRune(ch)
+	}
 }
 
 func (l *Lexer) readSingleQuoted() string {
@@ -508,7 +552,7 @@ func (l *Lexer) readUntilClose(open, close rune, sb *strings.Builder) {
 func isWordStop(ch rune) bool {
 	switch ch {
 	case ' ', '\t', '\r', '\n',
-		'|', '&', ';', '(', ')', '{', '}',
+		'|', '&', ';', '(', ')', '}',
 		'>', '<', '#':
 		return true
 	}

@@ -52,10 +52,21 @@ func unprotectWord(s string) string {
 }
 
 // expandWords expands a slice of raw word tokens into concrete argument strings.
-// Steps: tilde → variable → command-sub → arithmetic → word-split → glob → quote stripping.
+// Steps: brace → tilde → variable → command-sub → arithmetic → word-split → glob → quote stripping.
 func (sh *Shell) expandWords(words []string) []string {
-	var result []string
+	// Brace expansion first — can turn one word into many.
+	var braced []string
 	for _, w := range words {
+		// Don't brace-expand double-quoted strings.
+		if strings.HasPrefix(w, `"`) && strings.HasSuffix(w, `"`) && len(w) >= 2 {
+			braced = append(braced, w)
+		} else {
+			braced = append(braced, braceExpand(w)...)
+		}
+	}
+
+	var result []string
+	for _, w := range braced {
 		// Double-quoted strings are not word-split or glob-expanded
 		if strings.HasPrefix(w, `"`) && strings.HasSuffix(w, `"`) && len(w) >= 2 {
 			result = append(result, unprotectWord(sh.expandWord(w)))
