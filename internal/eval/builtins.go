@@ -60,6 +60,7 @@ func init() {
 		"bg":      builtinBg,
 		"wait":    builtinWait,
 		"kill":    builtinKill,
+		"ps":      builtinPs,
 	}
 }
 
@@ -439,6 +440,7 @@ Built-in commands:
   bg [%n]             Resume job in background
   wait [%n|pid]       Wait for job/process
   kill [-sig] pid|%n  Send signal to process or job (kill -l lists signals)
+  ps [-f] [-p pid]    List processes (-f shows PPID, -p filters by PID)
   test EXPR / [ EXPR ] Evaluate conditional expression
   break [n]           Break from n levels of loop
   continue [n]        Continue next iteration of loop
