@@ -67,6 +67,11 @@ const (
 // completeFn mirrors the liner WordCompleter signature.
 type completeFn func(line string, pos int) (head string, completions []string, tail string)
 
+type undoEntry struct {
+	buf []rune
+	pos int
+}
+
 type viState struct {
 	buf            []rune
 	pos            int
@@ -75,6 +80,7 @@ type viState struct {
 	histIdx        int
 	saved          []rune
 	yank           []rune
+	undoStack      []undoEntry
 	prompt         string
 	lastDisplayLen int // visible columns written in previous redraw (for erase-to-end)
 	lastFChar      rune
@@ -150,11 +156,13 @@ func (vs *viState) handleInsert(key keyEvent) (done bool, line string, err error
 		}
 	case keyBackspace:
 		if vs.pos > 0 {
+			vs.saveUndo()
 			vs.buf = append(vs.buf[:vs.pos-1], vs.buf[vs.pos:]...)
 			vs.pos--
 		}
 	case keyDelete:
 		if vs.pos < len(vs.buf) {
+			vs.saveUndo()
 			vs.buf = append(vs.buf[:vs.pos], vs.buf[vs.pos+1:]...)
 		}
 	case keyLeft:
@@ -174,21 +182,29 @@ func (vs *viState) handleInsert(key keyEvent) (done bool, line string, err error
 	case keyEnd, keyCtrlE:
 		vs.pos = len(vs.buf)
 	case keyCtrlU:
+		vs.saveUndo()
 		vs.yank = append([]rune(nil), vs.buf[:vs.pos]...)
 		vs.buf = append([]rune(nil), vs.buf[vs.pos:]...)
 		vs.pos = 0
 	case keyCtrlW:
 		start := vs.wordBackPos()
-		vs.yank = append([]rune(nil), vs.buf[start:vs.pos]...)
-		vs.buf = append(vs.buf[:start], vs.buf[vs.pos:]...)
-		vs.pos = start
+		if start < vs.pos {
+			vs.saveUndo()
+			vs.yank = append([]rune(nil), vs.buf[start:vs.pos]...)
+			vs.buf = append(vs.buf[:start], vs.buf[vs.pos:]...)
+			vs.pos = start
+		}
 	case keyCtrlK:
-		vs.yank = append([]rune(nil), vs.buf[vs.pos:]...)
-		vs.buf = vs.buf[:vs.pos]
+		if vs.pos < len(vs.buf) {
+			vs.saveUndo()
+			vs.yank = append([]rune(nil), vs.buf[vs.pos:]...)
+			vs.buf = vs.buf[:vs.pos]
+		}
 	case keyTab:
 		vs.doComplete()
 		return false, "", nil
 	case keyRune:
+		vs.saveUndo()
 		vs.buf = append(vs.buf[:vs.pos], append([]rune{key.r}, vs.buf[vs.pos:]...)...)
 		vs.pos++
 	}
@@ -296,6 +312,13 @@ func (vs *viState) handleNormal(key keyEvent) (done bool, line string, err error
 	return false, "", nil
 }
 
+func (vs *viState) saveUndo() {
+	vs.undoStack = append(vs.undoStack, undoEntry{
+		buf: append([]rune(nil), vs.buf...),
+		pos: vs.pos,
+	})
+}
+
 func (vs *viState) handleNormalRune(r rune) {
 	switch r {
 	case 'h':
@@ -318,6 +341,7 @@ func (vs *viState) handleNormalRune(r rune) {
 		}
 	case 'x':
 		if vs.pos < len(vs.buf) {
+			vs.saveUndo()
 			vs.yank = []rune{vs.buf[vs.pos]}
 			vs.buf = append(vs.buf[:vs.pos], vs.buf[vs.pos+1:]...)
 			if vs.pos >= len(vs.buf) && vs.pos > 0 {
@@ -326,22 +350,28 @@ func (vs *viState) handleNormalRune(r rune) {
 		}
 	case 'X':
 		if vs.pos > 0 {
+			vs.saveUndo()
 			vs.yank = []rune{vs.buf[vs.pos-1]}
 			vs.buf = append(vs.buf[:vs.pos-1], vs.buf[vs.pos:]...)
 			vs.pos--
 		}
 	case 'd':
 		next, err := readKey()
-		if err != nil {
+		if err != nil || next.typ != keyRune {
 			return
 		}
 		switch next.r {
 		case 'd':
+			vs.saveUndo()
 			vs.yank = append([]rune(nil), vs.buf...)
 			vs.buf = vs.buf[:0]
 			vs.pos = 0
 		case 'w':
 			end := vs.wordFwdPos()
+			if end == vs.pos {
+				return
+			}
+			vs.saveUndo()
 			vs.yank = append([]rune(nil), vs.buf[vs.pos:end]...)
 			vs.buf = append(vs.buf[:vs.pos], vs.buf[end:]...)
 			if vs.pos >= len(vs.buf) && vs.pos > 0 {
@@ -349,10 +379,18 @@ func (vs *viState) handleNormalRune(r rune) {
 			}
 		case 'b':
 			start := vs.wordBackPos()
+			if start == vs.pos {
+				return
+			}
+			vs.saveUndo()
 			vs.yank = append([]rune(nil), vs.buf[start:vs.pos]...)
 			vs.buf = append(vs.buf[:start], vs.buf[vs.pos:]...)
 			vs.pos = start
 		case '$':
+			if vs.pos >= len(vs.buf) {
+				return
+			}
+			vs.saveUndo()
 			vs.yank = append([]rune(nil), vs.buf[vs.pos:]...)
 			vs.buf = vs.buf[:vs.pos]
 			if vs.pos >= len(vs.buf) && vs.pos > 0 {
@@ -360,36 +398,55 @@ func (vs *viState) handleNormalRune(r rune) {
 			}
 		}
 	case 'D':
-		vs.yank = append([]rune(nil), vs.buf[vs.pos:]...)
-		vs.buf = vs.buf[:vs.pos]
-		if vs.pos >= len(vs.buf) && vs.pos > 0 {
-			vs.pos = len(vs.buf) - 1
+		if vs.pos < len(vs.buf) {
+			vs.saveUndo()
+			vs.yank = append([]rune(nil), vs.buf[vs.pos:]...)
+			vs.buf = vs.buf[:vs.pos]
+			if vs.pos >= len(vs.buf) && vs.pos > 0 {
+				vs.pos = len(vs.buf) - 1
+			}
 		}
 	case 'c':
 		next, err := readKey()
-		if err != nil {
+		if err != nil || next.typ != keyRune {
 			return
 		}
 		switch next.r {
 		case 'c':
+			vs.saveUndo()
 			vs.yank = append([]rune(nil), vs.buf...)
 			vs.buf = vs.buf[:0]
 			vs.pos = 0
 		case 'w':
 			end := vs.wordFwdPos()
+			if end == vs.pos {
+				vs.mode = viInsert
+				return
+			}
+			vs.saveUndo()
 			vs.yank = append([]rune(nil), vs.buf[vs.pos:end]...)
 			vs.buf = append(vs.buf[:vs.pos], vs.buf[end:]...)
+			if vs.pos > len(vs.buf) {
+				vs.pos = len(vs.buf)
+			}
 		case 'b':
 			start := vs.wordBackPos()
+			if start == vs.pos {
+				vs.mode = viInsert
+				return
+			}
+			vs.saveUndo()
 			vs.yank = append([]rune(nil), vs.buf[start:vs.pos]...)
 			vs.buf = append(vs.buf[:start], vs.buf[vs.pos:]...)
 			vs.pos = start
 		case '$':
+			vs.saveUndo()
 			vs.yank = append([]rune(nil), vs.buf[vs.pos:]...)
 			vs.buf = vs.buf[:vs.pos]
 		}
 		vs.mode = viInsert
 	case 'C':
+		vs.saveUndo()
 		vs.yank = append([]rune(nil), vs.buf[vs.pos:]...)
 		vs.buf = vs.buf[:vs.pos]
 		vs.mode = viInsert
@@ -399,14 +456,26 @@ func (vs *viState) handleNormalRune(r rune) {
 			return
 		}
 		if next.typ == keyRune && vs.pos < len(vs.buf) {
+			vs.saveUndo()
 			vs.buf[vs.pos] = next.r
 		}
 	case 's':
 		if vs.pos < len(vs.buf) {
+			vs.saveUndo()
 			vs.yank = []rune{vs.buf[vs.pos]}
 			vs.buf = append(vs.buf[:vs.pos], vs.buf[vs.pos+1:]...)
 		}
 		vs.mode = viInsert
+	case 'u':
+		if len(vs.undoStack) > 0 {
+			top := vs.undoStack[len(vs.undoStack)-1]
+			vs.undoStack = vs.undoStack[:len(vs.undoStack)-1]
+			vs.buf = top.buf
+			vs.pos = top.pos
+			if vs.pos >= len(vs.buf) && len(vs.buf) > 0 {
+				vs.pos = len(vs.buf) - 1
+			}
+		}
 	case 'i':
 		vs.mode = viInsert
 	case 'a':
