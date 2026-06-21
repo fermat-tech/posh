@@ -613,6 +613,22 @@ func (l *Lexer) readDoubleQuoted() string {
 				sb.WriteRune(next)
 				l.advance()
 			}
+		case '$':
+			l.advance()
+			sb.WriteRune('$')
+			ch2, ok2 := l.peek()
+			if !ok2 {
+				break
+			}
+			if ch2 == '(' {
+				l.advance()
+				sb.WriteByte('(')
+				l.readNestedParens(&sb)
+			} else if ch2 == '{' {
+				l.advance()
+				sb.WriteByte('{')
+				l.readUntilClose('{', '}', &sb)
+			}
 		default:
 			l.advance()
 			sb.WriteRune(ch)
@@ -642,9 +658,30 @@ func (l *Lexer) readNestedParens(sb *strings.Builder) {
 			sb.WriteString(l.readSingleQuoted())
 			sb.WriteByte('\'')
 		} else if ch == '"' {
-			dq := l.readDoubleQuoted()
-			sb.WriteString(dq[:len(dq)-1]) // strip trailing sentinel, re-add below
-			sb.WriteByte('"')
+			// Opening " already written by sb.WriteRune(ch) above.
+			// Read raw content until matching " so depth counting isn't confused by
+			// parens inside the quoted string. Handle \" escapes faithfully.
+			for {
+				inner, ok2 := l.peek()
+				if !ok2 || inner == '"' {
+					if ok2 {
+						l.advance()
+						sb.WriteRune('"')
+					}
+					break
+				}
+				if inner == '\\' {
+					l.advance()
+					sb.WriteByte('\\')
+					if esc, ok3 := l.peek(); ok3 {
+						l.advance()
+						sb.WriteRune(esc)
+					}
+				} else {
+					l.advance()
+					sb.WriteRune(inner)
+				}
+			}
 		}
 	}
 }

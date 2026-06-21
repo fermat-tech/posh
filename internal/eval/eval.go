@@ -543,6 +543,9 @@ func (sh *Shell) evalSimpleCmd(cmd *parser.SimpleCmd, stdin io.Reader, stdout, s
 	if len(cmd.Words) == 0 {
 		for _, a := range cmd.Assigns {
 			idx := strings.IndexByte(a, '=')
+			if idx < 0 {
+				continue
+			}
 			sh.setVar(a[:idx], sh.expandWord(a[idx+1:]))
 		}
 		return 0
@@ -566,6 +569,9 @@ func (sh *Shell) evalSimpleCmd(cmd *parser.SimpleCmd, stdin io.Reader, stdout, s
 	cmdEnv := sh.exportedEnv()
 	for _, a := range cmd.Assigns {
 		idx := strings.IndexByte(a, '=')
+		if idx < 0 {
+			continue
+		}
 		key := a[:idx]
 		val := sh.expandWord(a[idx+1:])
 		cmdEnv = append(cmdEnv, key+"="+val)
