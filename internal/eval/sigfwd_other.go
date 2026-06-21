@@ -2,8 +2,18 @@
 
 package eval
 
-import "os/exec"
+import (
+	"errors"
+	"os/exec"
+	"syscall"
+)
 
 func setForegroundAttrs(_ *exec.Cmd) {}
-func sendInterrupt(pid int)          {}
-func killProcessTree(pid int) error  { return nil }
+
+func sendInterrupt(pid int) {
+	syscall.Kill(pid, syscall.SIGINT)
+}
+
+// killProcessTree is a no-op on Unix; returning an error causes the caller
+// to fall back to j.Cmd.Process.Signal(sig) which is the correct Unix path.
+func killProcessTree(pid int) error { return errors.New("use direct signal") }
