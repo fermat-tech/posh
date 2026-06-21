@@ -46,8 +46,9 @@ func main() {
 			fmt.Fprintf(colorStderr, "%s: cannot open %q: %v\n", progName, args[0], err)
 			os.Exit(1)
 		}
+		src := strings.ReplaceAll(string(data), "\r\n", "\n")
 		sh.SetPosParams(args[1:])
-		code := sh.EvalString(string(data))
+		code := sh.EvalString(src)
 		os.Exit(code)
 	}
 

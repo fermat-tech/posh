@@ -645,6 +645,14 @@ func (sh *Shell) evalSimpleCmd(cmd *parser.SimpleCmd, stdin io.Reader, stdout, s
 	// so we catch it here and send CTRL_BREAK_EVENT to the child's group.
 	setForegroundAttrs(c)
 	if err := c.Start(); err != nil {
+		// On Unix, exec fails with ENOENT when the shebang interpreter isn't
+		// found (e.g. CRLF-corrupted "#!/usr/bin/env posh\r"), and with
+		// ENOEXEC when the file has no shebang at all.  In both cases, fall
+		// back to interpreting the file as a posh script.
+		if code := sh.tryRunAsScript(resolvedPath, words[1:], rStdin, rStdout, rStderr); code >= 0 {
+			sh.lastExit = code
+			return code
+		}
 		fmt.Fprintf(rStderr, "%s: %v\n", sh.name, err)
 		return 1
 	}
@@ -683,6 +691,40 @@ func (sh *Shell) evalSimpleCmd(cmd *parser.SimpleCmd, stdin io.Reader, stdout, s
 }
 
 // runCaptured runs a shell string and captures its stdout.
+// tryRunAsScript attempts to interpret path as a posh script when exec failed.
+// Returns the exit code on success, or -1 if the file cannot be read or is
+// clearly not a text script (e.g. a real binary).
+func (sh *Shell) tryRunAsScript(path string, args []string, stdin io.Reader, stdout, stderr io.Writer) int {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return -1
+	}
+	// Reject obvious binaries (ELF, PE, Mach-O magic bytes).
+	if len(data) >= 4 &&
+		(data[0] == 0x7f && data[1] == 'E' || // ELF
+			data[0] == 'M' && data[1] == 'Z' || // PE/DOS
+			data[0] == 0xfe && data[1] == 0xed || // Mach-O BE
+			data[0] == 0xce && data[1] == 0xfa) { // Mach-O LE
+		return -1
+	}
+	// Normalise CRLF → LF so Windows-edited scripts work on Unix.
+	src := strings.ReplaceAll(string(data), "\r\n", "\n")
+	// Skip shebang line if present.
+	if strings.HasPrefix(src, "#!") {
+		if nl := strings.Index(src, "\n"); nl >= 0 {
+			src = src[nl+1:]
+		} else {
+			src = ""
+		}
+	}
+	sub := sh.fork()
+	sub.Stdin = stdin
+	sub.Stdout = stdout
+	sub.Stderr = stderr
+	sub.SetPosParams(args)
+	return sub.EvalString(src)
+}
+
 func (sh *Shell) runCaptured(s string) (string, error) {
 	var buf bytes.Buffer
 	sub := sh.fork()
