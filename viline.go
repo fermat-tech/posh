@@ -561,10 +561,7 @@ func (vs *viState) historyUp() {
 	if vs.histIdx > 0 {
 		vs.histIdx--
 		vs.buf = []rune(vs.history[vs.histIdx])
-		vs.pos = len(vs.buf)
-		if vs.mode == viNormal && vs.pos > 0 {
-			vs.pos--
-		}
+		vs.pos = 0
 	}
 }
 
@@ -576,10 +573,7 @@ func (vs *viState) historyDown() {
 		} else {
 			vs.buf = []rune(vs.history[vs.histIdx])
 		}
-		vs.pos = len(vs.buf)
-		if vs.mode == viNormal && vs.pos > 0 {
-			vs.pos--
-		}
+		vs.pos = 0
 	}
 }
 
