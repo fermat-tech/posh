@@ -101,9 +101,13 @@ type Lexer struct {
 
 // New creates a Lexer for the given input string.
 func New(input string) *Lexer {
+	return NewAt(input, 1)
+}
+
+func NewAt(input string, lineBase int) *Lexer {
 	// Strip UTF-8 BOM so files saved by Windows Notepad / PowerShell don't break.
 	input = strings.TrimPrefix(input, "\xef\xbb\xbf")
-	return &Lexer{input: []rune(input), line: 1}
+	return &Lexer{input: []rune(input), line: lineBase}
 }
 
 func (l *Lexer) peek() (rune, bool) {
@@ -380,6 +384,7 @@ const protectedLBracket    rune = 0xE007 // prevents glob expansion
 const protectedDoubleQuote rune = 0xE008 // prevents double-quote stripping in expandUnquoted
 const protectedLBrace      rune = 0xE009 // prevents brace expansion
 const protectedNewline     rune = 0xE00A // literal newline from $'...' quoting
+const protectedSingleQuote rune = 0xE00B // prevents single-quote stripping in expandUnquoted
 
 func (l *Lexer) readWord() string {
 	var sb strings.Builder
@@ -435,14 +440,7 @@ func (l *Lexer) readWord() string {
 				l.advance() // line continuation
 			} else {
 				l.advance()
-				switch next {
-				case ' ':
-					sb.WriteRune(protectedSpace)
-				case '\t':
-					sb.WriteRune(protectedTab)
-				default:
-					sb.WriteRune(next)
-				}
+				l.protectRune(&sb, next)
 			}
 		case '{':
 			// Brace group mid-word: consume everything up to the matching }.
@@ -586,6 +584,8 @@ func (l *Lexer) protectRune(sb *strings.Builder, ch rune) {
 		sb.WriteRune(protectedLBracket)
 	case '"':
 		sb.WriteRune(protectedDoubleQuote)
+	case '\'':
+		sb.WriteRune(protectedSingleQuote)
 	case '{':
 		sb.WriteRune(protectedLBrace)
 	default:

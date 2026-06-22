@@ -32,7 +32,11 @@ func New(tokens []lexer.Token) *Parser {
 
 // Parse parses a complete input string and returns a Node (or nil for empty input).
 func Parse(input string) (Node, error) {
-	l := lexer.New(input)
+	return ParseAt(input, 1)
+}
+
+func ParseAt(input string, lineBase int) (Node, error) {
+	l := lexer.NewAt(input, lineBase)
 	toks := l.Tokenize()
 	if len(l.Errors) > 0 {
 		return nil, &ParseError{Msg: l.Errors[0]}
@@ -810,7 +814,11 @@ func NeedsContinuation(input string) bool {
 	}
 
 	// Count keyword nesting using the lexer
-	toks := lexer.New(input).Tokenize()
+	l := lexer.New(input)
+	toks := l.Tokenize()
+	if len(l.Errors) > 0 {
+		return false // let the caller evaluate the chunk so the error gets reported
+	}
 	depth := 0
 	for _, t := range toks {
 		if t.Type != lexer.WORD {

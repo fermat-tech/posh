@@ -29,6 +29,7 @@ type Shell struct {
 	funcs     map[string]*parser.FuncDef
 	posParams []string // $1 $2 ... (set for scripts/functions)
 	lastExit  int      // $?
+	parseErr  bool     // true when the last EvalStringAt call had a lex/parse error
 	jobs      *JobTable
 	traps     map[string]string // signal name → command
 	opts         map[string]bool   // shell options: set -o name / set +o name
@@ -157,17 +158,30 @@ func (sh *Shell) Eval(node parser.Node) int {
 
 // EvalString parses and evaluates a string.
 func (sh *Shell) EvalString(s string) int {
+	return sh.EvalStringAt(s, 1)
+}
+
+// EvalStringAt parses and evaluates s, reporting errors with lineBase as the first line number.
+func (sh *Shell) EvalStringAt(s string, lineBase int) int {
 	s = preprocessHeredocs(s)
-	node, err := parser.Parse(s)
+	node, err := parser.ParseAt(s, lineBase)
 	if err != nil {
 		fmt.Fprintf(sh.Stderr, "%s: %v\n", sh.name, err)
 		sh.lastExit = 1
+		sh.parseErr = true
 		return 1
 	}
+	sh.parseErr = false
 	code := sh.Eval(node)
 	sh.lastExit = code
 	return code
 }
+
+// LastExit returns the exit code of the last evaluated command.
+func (sh *Shell) LastExit() int { return sh.lastExit }
+
+// HasParseError reports whether the last EvalStringAt call failed due to a lex/parse error.
+func (sh *Shell) HasParseError() bool { return sh.parseErr }
 
 func (sh *Shell) evalList(list *parser.List) int {
 	// ampAt reports whether the separator at index i is &, meaning the node

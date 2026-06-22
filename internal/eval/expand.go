@@ -22,12 +22,13 @@ const protectedLBracket    rune = 0xE007
 const protectedDoubleQuote rune = 0xE008
 const protectedLBrace      rune = 0xE009
 const protectedNewline     rune = 0xE00A
+const protectedSingleQuote rune = 0xE00B
 
 func unprotectWord(s string) string {
 	if !strings.ContainsAny(s, string([]rune{
 		protectedSpace, protectedTab, protectedDollar,
 		protectedBackslash, protectedStar, protectedQuestion, protectedLBracket,
-		protectedDoubleQuote, protectedLBrace, protectedNewline,
+		protectedDoubleQuote, protectedSingleQuote, protectedLBrace, protectedNewline,
 	})) {
 		return s
 	}
@@ -52,6 +53,8 @@ func unprotectWord(s string) string {
 			sb.WriteByte('[')
 		case protectedDoubleQuote:
 			sb.WriteByte('"')
+		case protectedSingleQuote:
+			sb.WriteByte('\'')
 		case protectedLBrace:
 			sb.WriteByte('{')
 		default:
@@ -134,7 +137,7 @@ func (sh *Shell) expandWord(w string) string {
 	if !strings.ContainsAny(w, `~$"'\`+string([]rune{
 		protectedSpace, protectedTab, protectedDollar,
 		protectedBackslash, protectedStar, protectedQuestion, protectedLBracket,
-		protectedDoubleQuote, protectedLBrace, protectedNewline,
+		protectedDoubleQuote, protectedSingleQuote, protectedLBrace, protectedNewline,
 	})) {
 		return w
 	}

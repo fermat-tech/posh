@@ -202,8 +202,11 @@ func viReadMultiLine(sh *eval.Shell, completer completeFn) (string, error) {
 func runNonInteractive(sh *eval.Shell) {
 	sc := bufio.NewScanner(os.Stdin)
 	var lines []string
+	lineBase := 1  // absolute line number of first line in current chunk
+	linesRead := 0 // total lines consumed so far
 	for sc.Scan() {
 		line := sc.Text()
+		linesRead++
 		lines = append(lines, line)
 		full := strings.Join(lines, "\n")
 		if parser.NeedsContinuation(full) {
@@ -211,12 +214,19 @@ func runNonInteractive(sh *eval.Shell) {
 		}
 		trimmed := strings.TrimSpace(full)
 		if trimmed != "" && !strings.HasPrefix(trimmed, "#") {
-			sh.EvalString(full)
+			code := sh.EvalStringAt(full, lineBase)
+			if sh.HasParseError() {
+				os.Exit(code)
+			}
 		}
+		lineBase = linesRead + 1
 		lines = nil
 	}
 	if len(lines) > 0 {
-		sh.EvalString(strings.Join(lines, "\n"))
+		code := sh.EvalStringAt(strings.Join(lines, "\n"), lineBase)
+		if sh.HasParseError() {
+			os.Exit(code)
+		}
 	}
 }
 
