@@ -30,6 +30,7 @@ const (
 	RPAREN                         // )
 	LBRACE                         // {
 	RBRACE                         // }
+	DLARITH                        // (( arithmetic command ))
 	NEWLINE                        // \n
 	EOF
 )
@@ -74,6 +75,8 @@ func (t TokenType) String() string {
 		return "{"
 	case RBRACE:
 		return "}"
+	case DLARITH:
+		return "(("
 	case NEWLINE:
 		return "NEWLINE"
 	case EOF:
@@ -172,8 +175,41 @@ func (l *Lexer) Tokenize() []Token {
 
 		case ch == '(':
 			l.advance()
-			tokens = append(tokens, Token{Type: LPAREN})
-			wordPos = false
+			if next, ok2 := l.peek(); ok2 && next == '(' {
+				// (( arithmetic command )) — read until matching ))
+				l.advance()
+				var sb strings.Builder
+				depth := 1
+				for {
+					c, ok3 := l.peek()
+					if !ok3 {
+						break
+					}
+					l.advance()
+					if c == '(' {
+						depth++
+						sb.WriteRune(c)
+					} else if c == ')' {
+						if depth > 1 {
+							depth--
+							sb.WriteRune(c)
+						} else {
+							// closing first ): consume optional second )
+							if c2, ok4 := l.peek(); ok4 && c2 == ')' {
+								l.advance()
+							}
+							break
+						}
+					} else {
+						sb.WriteRune(c)
+					}
+				}
+				tokens = append(tokens, Token{Type: DLARITH, Val: strings.TrimSpace(sb.String())})
+				wordPos = true
+			} else {
+				tokens = append(tokens, Token{Type: LPAREN})
+				wordPos = false
+			}
 
 		case ch == ')':
 			l.advance()
@@ -428,6 +464,10 @@ func (l *Lexer) readWord() string {
 					l.advance()
 					sb.WriteByte('{')
 					l.readUntilClose('{', '}', &sb)
+				} else if ch2 == '#' {
+					// $# — number of positional params; consume # so it isn't treated as comment
+					l.advance()
+					sb.WriteRune('#')
 				}
 				// else: $VAR — variable name will be read as ordinary chars in next iterations
 			}
@@ -628,6 +668,9 @@ func (l *Lexer) readDoubleQuoted() string {
 				l.advance()
 				sb.WriteByte('{')
 				l.readUntilClose('{', '}', &sb)
+			} else if ch2 == '#' {
+				l.advance()
+				sb.WriteRune('#')
 			}
 		default:
 			l.advance()

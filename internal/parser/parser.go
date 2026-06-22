@@ -222,6 +222,12 @@ func (p *Parser) parseCommandNode() (Node, error) {
 		return p.parseSubshell()
 	}
 
+	// Arithmetic command (( expr ))
+	if t.Type == lexer.DLARITH {
+		tok := p.consume()
+		return &ArithCmd{Expr: tok.Val}, nil
+	}
+
 	// Compound commands and function definitions
 	if t.Type == lexer.WORD {
 		// Function definition: NAME () { ... }

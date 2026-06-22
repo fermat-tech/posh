@@ -457,6 +457,147 @@ func expandBareArithVars(sh *Shell, expr string) string {
 
 func parseArithExpr(s string) (int64, error) {
 	s = strings.TrimSpace(s)
+	return parseArithOr(s)
+}
+
+// parseArithOr handles || (lowest precedence)
+func parseArithOr(s string) (int64, error) {
+	depth := 0
+	for i := len(s) - 1; i >= 1; i-- {
+		switch s[i] {
+		case ')':
+			depth++
+		case '(':
+			depth--
+		case '|':
+			if depth == 0 && s[i-1] == '|' {
+				left, err := parseArithOr(s[:i-1])
+				if err != nil {
+					return 0, err
+				}
+				right, err := parseArithAnd(s[i+1:])
+				if err != nil {
+					return 0, err
+				}
+				if left != 0 || right != 0 {
+					return 1, nil
+				}
+				return 0, nil
+			}
+		}
+	}
+	return parseArithAnd(s)
+}
+
+// parseArithAnd handles &&
+func parseArithAnd(s string) (int64, error) {
+	depth := 0
+	for i := len(s) - 1; i >= 1; i-- {
+		switch s[i] {
+		case ')':
+			depth++
+		case '(':
+			depth--
+		case '&':
+			if depth == 0 && s[i-1] == '&' {
+				left, err := parseArithAnd(s[:i-1])
+				if err != nil {
+					return 0, err
+				}
+				right, err := parseArithCmp(s[i+1:])
+				if err != nil {
+					return 0, err
+				}
+				if left != 0 && right != 0 {
+					return 1, nil
+				}
+				return 0, nil
+			}
+		}
+	}
+	return parseArithCmp(s)
+}
+
+// parseArithCmp handles ==, !=, <=, >=, <, >
+func parseArithCmp(s string) (int64, error) {
+	depth := 0
+	for i := len(s) - 1; i >= 0; i-- {
+		switch s[i] {
+		case ')':
+			depth++
+		case '(':
+			depth--
+		}
+		if depth != 0 {
+			continue
+		}
+		// Two-char operators: check s[i-1:i+1]
+		if i > 0 {
+			op2 := s[i-1 : i+1]
+			switch op2 {
+			case "==", "!=", "<=", ">=":
+				left, err := parseArithAdd(strings.TrimSpace(s[:i-1]))
+				if err != nil {
+					return 0, err
+				}
+				right, err := parseArithAdd(strings.TrimSpace(s[i+1:]))
+				if err != nil {
+					return 0, err
+				}
+				switch op2 {
+				case "==":
+					if left == right {
+						return 1, nil
+					}
+					return 0, nil
+				case "!=":
+					if left != right {
+						return 1, nil
+					}
+					return 0, nil
+				case "<=":
+					if left <= right {
+						return 1, nil
+					}
+					return 0, nil
+				case ">=":
+					if left >= right {
+						return 1, nil
+					}
+					return 0, nil
+				}
+			}
+		}
+		// One-char < and > (not part of <= or >=)
+		if s[i] == '<' && i > 0 && (i+1 >= len(s) || s[i+1] != '=') {
+			left, err := parseArithAdd(strings.TrimSpace(s[:i]))
+			if err != nil {
+				return 0, err
+			}
+			right, err := parseArithAdd(strings.TrimSpace(s[i+1:]))
+			if err != nil {
+				return 0, err
+			}
+			if left < right {
+				return 1, nil
+			}
+			return 0, nil
+		}
+		if s[i] == '>' && i > 0 && (i+1 >= len(s) || s[i+1] != '=') {
+			left, err := parseArithAdd(strings.TrimSpace(s[:i]))
+			if err != nil {
+				return 0, err
+			}
+			right, err := parseArithAdd(strings.TrimSpace(s[i+1:]))
+			if err != nil {
+				return 0, err
+			}
+			if left > right {
+				return 1, nil
+			}
+			return 0, nil
+		}
+	}
 	return parseArithAdd(s)
 }
 
@@ -531,6 +672,13 @@ func parseArithAtom(s string) (int64, error) {
 	s = strings.TrimSpace(s)
 	if strings.HasPrefix(s, "(") && strings.HasSuffix(s, ")") {
 		return parseArithExpr(s[1 : len(s)-1])
+	}
+	if strings.HasPrefix(s, "!") {
+		v, err := parseArithAtom(s[1:])
+		if v == 0 {
+			return 1, err
+		}
+		return 0, err
 	}
 	if strings.HasPrefix(s, "-") {
 		v, err := parseArithAtom(s[1:])

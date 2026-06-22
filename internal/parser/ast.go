@@ -137,3 +137,11 @@ type FuncDef struct {
 }
 
 func (*FuncDef) nodeTag() {}
+
+// ArithCmd is a standalone (( expr )) arithmetic command.
+// Returns exit code 0 if expr is non-zero, 1 if zero.
+type ArithCmd struct {
+	Expr string
+}
+
+func (*ArithCmd) nodeTag() {}

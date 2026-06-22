@@ -143,6 +143,14 @@ func (sh *Shell) Eval(node parser.Node) int {
 		return sh.evalCaseCmd(n)
 	case *parser.FuncDef:
 		return sh.evalFuncDef(n)
+	case *parser.ArithCmd:
+		val := evalArith(sh, n.Expr)
+		if val != 0 {
+			sh.lastExit = 0
+			return 0
+		}
+		sh.lastExit = 1
+		return 1
 	}
 	return 0
 }
