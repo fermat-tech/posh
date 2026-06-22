@@ -393,9 +393,10 @@ func (l *Lexer) readWord() string {
 		}
 		switch ch {
 		case '\'':
+			midWord := l.pos > 0 && (unicode.IsLetter(l.input[l.pos-1]) || unicode.IsDigit(l.input[l.pos-1]))
 			l.advance()
 			// Protect special characters so the evaluator treats them as literals.
-			for _, ch := range l.readSingleQuoted() {
+			for _, ch := range l.readSingleQuotedCtx(midWord) {
 				switch ch {
 				case ' ':
 					sb.WriteRune(protectedSpace)
@@ -420,8 +421,9 @@ func (l *Lexer) readWord() string {
 				}
 			}
 		case '"':
+			midWord := l.pos > 0 && (unicode.IsLetter(l.input[l.pos-1]) || unicode.IsDigit(l.input[l.pos-1]))
 			l.advance()
-			sb.WriteString(l.readDoubleQuoted())
+			sb.WriteString(l.readDoubleQuotedCtx(midWord))
 		case '\\':
 			l.advance()
 			next, ok2 := l.peek()
@@ -553,6 +555,15 @@ func (l *Lexer) readAnsiCQuoted(sb *strings.Builder) {
 	}
 }
 
+func (l *Lexer) unquoteErr(quote rune, startLine int, preview string) string {
+	runes := []rune(preview)
+	if len(runes) > 10 {
+		runes = runes[:10]
+	}
+	return fmt.Sprintf("line %d: unterminated %s-quoted string: %c%s",
+		startLine, map[rune]string{'"': "double", '\'': "single"}[quote], quote, string(runes))
+}
+
 // protectRune writes ch with the appropriate sentinel if it needs to be
 // protected from word-splitting or glob expansion.
 func (l *Lexer) protectRune(sb *strings.Builder, ch rune) {
@@ -603,23 +614,28 @@ func (l *Lexer) readBraceGroup(sb *strings.Builder) {
 }
 
 func (l *Lexer) readSingleQuoted() string {
+	return l.readSingleQuotedCtx(false)
+}
+
+func (l *Lexer) readSingleQuotedCtx(midWord bool) string {
 	startLine := l.line
+	errSet := false
 	var sb strings.Builder
 	var preview strings.Builder
 	previewLen := 0
 	for {
 		ch, ok := l.peek()
 		if !ok {
-			p := preview.String()
-			if len([]rune(p)) > 10 {
-				p = string([]rune(p)[:10])
-			}
-			l.Errors = append(l.Errors, fmt.Sprintf("line %d: unterminated single-quoted string: '%s", startLine, p))
+			l.Errors = append(l.Errors, l.unquoteErr('\'', startLine, preview.String()))
 			break
 		}
 		if ch == '\'' {
 			l.advance()
 			break
+		}
+		if midWord && ch == '\n' && !errSet {
+			l.Errors = append(l.Errors, l.unquoteErr('\'', startLine, preview.String()))
+			errSet = true
 		}
 		l.advance()
 		if previewLen < 10 {
@@ -634,7 +650,12 @@ func (l *Lexer) readSingleQuoted() string {
 // readDoubleQuoted stores content with leading/trailing " sentinels so the evaluator
 // can distinguish double-quoted strings from bare words.
 func (l *Lexer) readDoubleQuoted() string {
+	return l.readDoubleQuotedCtx(false)
+}
+
+func (l *Lexer) readDoubleQuotedCtx(midWord bool) string {
 	startLine := l.line
+	errSet := false
 	var sb strings.Builder
 	var preview strings.Builder
 	previewLen := 0
@@ -642,16 +663,16 @@ func (l *Lexer) readDoubleQuoted() string {
 	for {
 		ch, ok := l.peek()
 		if !ok {
-			p := preview.String()
-			if len([]rune(p)) > 10 {
-				p = string([]rune(p)[:10])
-			}
-			l.Errors = append(l.Errors, fmt.Sprintf("line %d: unterminated double-quoted string: \"%s", startLine, p))
+			l.Errors = append(l.Errors, l.unquoteErr('"', startLine, preview.String()))
 			break
 		}
 		if ch == '"' {
 			l.advance()
 			break
+		}
+		if midWord && ch == '\n' && !errSet {
+			l.Errors = append(l.Errors, l.unquoteErr('"', startLine, preview.String()))
+			errSet = true
 		}
 		if previewLen < 10 {
 			preview.WriteRune(ch)
