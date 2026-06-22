@@ -93,15 +93,17 @@ type Token struct {
 
 // Lexer holds the tokenizer state.
 type Lexer struct {
-	input []rune
-	pos   int
+	input  []rune
+	pos    int
+	line   int      // current 1-based line number
+	Errors []string // unterminated-string diagnostics
 }
 
 // New creates a Lexer for the given input string.
 func New(input string) *Lexer {
 	// Strip UTF-8 BOM so files saved by Windows Notepad / PowerShell don't break.
 	input = strings.TrimPrefix(input, "\xef\xbb\xbf")
-	return &Lexer{input: []rune(input)}
+	return &Lexer{input: []rune(input), line: 1}
 }
 
 func (l *Lexer) peek() (rune, bool) {
@@ -122,6 +124,9 @@ func (l *Lexer) peekAt(offset int) (rune, bool) {
 func (l *Lexer) advance() rune {
 	ch := l.input[l.pos]
 	l.pos++
+	if ch == '\n' {
+		l.line++
+	}
 	return ch
 }
 
@@ -598,16 +603,29 @@ func (l *Lexer) readBraceGroup(sb *strings.Builder) {
 }
 
 func (l *Lexer) readSingleQuoted() string {
+	startLine := l.line
 	var sb strings.Builder
+	var preview strings.Builder
+	previewLen := 0
 	for {
 		ch, ok := l.peek()
-		if !ok || ch == '\'' {
-			if ok {
-				l.advance()
+		if !ok {
+			p := preview.String()
+			if len([]rune(p)) > 10 {
+				p = string([]rune(p)[:10])
 			}
+			l.Errors = append(l.Errors, fmt.Sprintf("line %d: unterminated single-quoted string: '%s", startLine, p))
+			break
+		}
+		if ch == '\'' {
+			l.advance()
 			break
 		}
 		l.advance()
+		if previewLen < 10 {
+			preview.WriteRune(ch)
+			previewLen++
+		}
 		sb.WriteRune(ch)
 	}
 	return sb.String()
@@ -616,15 +634,28 @@ func (l *Lexer) readSingleQuoted() string {
 // readDoubleQuoted stores content with leading/trailing " sentinels so the evaluator
 // can distinguish double-quoted strings from bare words.
 func (l *Lexer) readDoubleQuoted() string {
+	startLine := l.line
 	var sb strings.Builder
+	var preview strings.Builder
+	previewLen := 0
 	sb.WriteByte('"')
 	for {
 		ch, ok := l.peek()
-		if !ok || ch == '"' {
-			if ok {
-				l.advance()
+		if !ok {
+			p := preview.String()
+			if len([]rune(p)) > 10 {
+				p = string([]rune(p)[:10])
 			}
+			l.Errors = append(l.Errors, fmt.Sprintf("line %d: unterminated double-quoted string: \"%s", startLine, p))
 			break
+		}
+		if ch == '"' {
+			l.advance()
+			break
+		}
+		if previewLen < 10 {
+			preview.WriteRune(ch)
+			previewLen++
 		}
 		switch ch {
 		case '\\':

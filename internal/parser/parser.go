@@ -34,6 +34,9 @@ func New(tokens []lexer.Token) *Parser {
 func Parse(input string) (Node, error) {
 	l := lexer.New(input)
 	toks := l.Tokenize()
+	if len(l.Errors) > 0 {
+		return nil, &ParseError{Msg: l.Errors[0]}
+	}
 	p := New(toks)
 	return p.parseList()
 }
