@@ -672,38 +672,4 @@ func bufDisplayWidth(buf []rune) int {
 	return w
 }
 
-func (vs *viState) redraw() {
-	promptVW := visibleLen(vs.prompt)
-	// Use display column widths, not rune counts, so wide chars (emoji, CJK)
-	// are accounted for correctly.
-	contentW := bufDisplayWidth(vs.buf)
-	currentLen := promptVW + contentW
-
-	// Return to the column where this prompt started, then rewrite.
-	setCursorX(vs.originCol)
-
-	var sb strings.Builder
-	sb.WriteString(vs.prompt)
-	sb.WriteString(string(vs.buf))
-
-	// Erase leftover characters if the line got shorter since last redraw.
-	endCol := currentLen
-	if vs.lastDisplayLen > endCol {
-		endCol = vs.lastDisplayLen
-	}
-	for i := currentLen; i < vs.lastDisplayLen; i++ {
-		sb.WriteByte(' ')
-	}
-	vs.lastDisplayLen = currentLen
-
-	// Move cursor back to the correct position using backspaces.
-	// target is the display column of the cursor (after prompt + buf[:pos]).
-	target := promptVW + bufDisplayWidth(vs.buf[:vs.pos])
-	for i := target; i < endCol; i++ {
-		sb.WriteByte('\b')
-	}
-
-	fmt.Fprint(os.Stdout, sb.String())
-}
-
 func (vs *viState) crlf() { fmt.Fprint(os.Stdout, "\r\n") }
