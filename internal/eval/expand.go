@@ -408,6 +408,9 @@ func (sh *Shell) homeDir() string {
 	if h := sh.getVar("HOME"); h != "" {
 		return h
 	}
+	if h := sh.getVar("USERPROFILE"); h != "" {
+		return h
+	}
 	u, err := user.Current()
 	if err != nil {
 		return "."

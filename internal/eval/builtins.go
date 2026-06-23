@@ -120,7 +120,7 @@ func builtinCd(sh *Shell, args []string, _ io.Reader, _, stderr io.Writer) int {
 	case 0:
 		dir = sh.homeDir()
 	case 1:
-		dir = sh.expandWord(args[0])
+		dir = args[0]
 	default:
 		fmt.Fprintf(stderr, "cd: too many arguments\n")
 		return 1

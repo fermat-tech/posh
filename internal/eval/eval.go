@@ -66,6 +66,13 @@ func New(name string) *Shell {
 			sh.exported[k] = true
 		}
 	}
+	// On Windows, HOME is not a standard env var; synthesize it from USERPROFILE.
+	if sh.vars["HOME"] == "" {
+		if up := sh.vars["USERPROFILE"]; up != "" {
+			sh.vars["HOME"] = up
+			sh.exported["HOME"] = true
+		}
+	}
 	return sh
 }
 
