@@ -62,23 +62,25 @@ const (
 	enableVTInput        = 0x0200 // deliver keyboard events as UTF-8 VT sequences
 )
 
-// consoleRawMode puts the Windows console into raw mode (no echo, no line
-// buffering) with UTF-8 input and VT sequence processing enabled.
-// Returns a restore function.
-func consoleRawMode() (restore func(), err error) {
-	stdin := syscall.Handle(os.Stdin.Fd())
-
-	// Save current code pages and switch to UTF-8 (65001).
-	oldCP, _, _ := procGetConsoleCP.Call()
-	oldOCP, _, _ := procGetConsoleOutputCP.Call()
+// initUTF8 switches the console to UTF-8 code pages (65001) at startup so
+// that all shell output — not just the line-editing phase — is rendered
+// correctly. Called once from init(); the original values are never restored
+// because the shell should operate in UTF-8 throughout its lifetime.
+func init() {
 	procSetConsoleCP.Call(65001)
 	procSetConsoleOutputCP.Call(65001)
+}
+
+// consoleRawMode puts the Windows console into raw mode (no echo, no line
+// buffering) with VT sequence processing enabled. Code pages are already
+// UTF-8 (set in init). Returns a restore function that only restores the
+// console input mode, not the code pages.
+func consoleRawMode() (restore func(), err error) {
+	stdin := syscall.Handle(os.Stdin.Fd())
 
 	var oldIn uint32
 	r, _, e := procGetConsoleMode.Call(uintptr(stdin), uintptr(unsafe.Pointer(&oldIn)))
 	if r == 0 {
-		procSetConsoleCP.Call(oldCP)
-		procSetConsoleOutputCP.Call(oldOCP)
 		return nil, e
 	}
 
@@ -88,15 +90,11 @@ func consoleRawMode() (restore func(), err error) {
 		enableExtendedFlags | enableVTInput
 	r, _, e = procSetConsoleMode.Call(uintptr(stdin), uintptr(newIn))
 	if r == 0 {
-		procSetConsoleCP.Call(oldCP)
-		procSetConsoleOutputCP.Call(oldOCP)
 		return nil, e
 	}
 
 	return func() {
 		procSetConsoleMode.Call(uintptr(stdin), uintptr(oldIn))
-		procSetConsoleCP.Call(oldCP)
-		procSetConsoleOutputCP.Call(oldOCP)
 	}, nil
 }
 
