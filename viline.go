@@ -10,6 +10,8 @@ import (
 	"strings"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/mattn/go-runewidth"
 )
 
 // ---- types shared with platform file ----
@@ -640,7 +642,8 @@ func readUTF8Rune(first byte) (rune, error) {
 
 // ---- display ----
 
-// visibleLen returns the display width of s, ignoring ANSI escape codes.
+// visibleLen returns the display column width of s, ignoring ANSI escape
+// codes and using proper widths for wide characters (emoji, CJK, etc.).
 func visibleLen(s string) int {
 	n := 0
 	inEsc := false
@@ -655,14 +658,26 @@ func visibleLen(s string) int {
 			inEsc = true
 			continue
 		}
-		n++
+		n += runewidth.RuneWidth(r)
 	}
 	return n
 }
 
+// bufDisplayWidth returns the display column width of a rune slice.
+func bufDisplayWidth(buf []rune) int {
+	w := 0
+	for _, r := range buf {
+		w += runewidth.RuneWidth(r)
+	}
+	return w
+}
+
 func (vs *viState) redraw() {
 	promptVW := visibleLen(vs.prompt)
-	currentLen := promptVW + len(vs.buf)
+	// Use display column widths, not rune counts, so wide chars (emoji, CJK)
+	// are accounted for correctly.
+	contentW := bufDisplayWidth(vs.buf)
+	currentLen := promptVW + contentW
 
 	// Return to the column where this prompt started, then rewrite.
 	setCursorX(vs.originCol)
@@ -672,7 +687,6 @@ func (vs *viState) redraw() {
 	sb.WriteString(string(vs.buf))
 
 	// Erase leftover characters if the line got shorter since last redraw.
-	// endCol is where the cursor actually sits after writing buf + erase spaces.
 	endCol := currentLen
 	if vs.lastDisplayLen > endCol {
 		endCol = vs.lastDisplayLen
@@ -683,7 +697,8 @@ func (vs *viState) redraw() {
 	vs.lastDisplayLen = currentLen
 
 	// Move cursor back to the correct position using backspaces.
-	target := promptVW + vs.pos
+	// target is the display column of the cursor (after prompt + buf[:pos]).
+	target := promptVW + bufDisplayWidth(vs.buf[:vs.pos])
 	for i := target; i < endCol; i++ {
 		sb.WriteByte('\b')
 	}
