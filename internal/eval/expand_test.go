@@ -6,8 +6,12 @@ import (
 	"testing"
 )
 
-// eval runs src in a fresh shell and returns trimmed stdout. It fails the test
-// if a top-level exit escapes (use run from exit_test.go for those cases).
+// eval runs src in a fresh shell and returns its stdout with the trailing
+// newline removed. All carriage returns are stripped so results don't depend on
+// whether an external tool such as cat emits Windows (CRLF) or Unix (LF) line
+// endings — this normalizes trailing, internal (multi-line heredoc), and any
+// stray lone-CR output uniformly. It fails the test if a top-level exit escapes
+// (use run from exit_test.go for those cases).
 func eval(t *testing.T, src string) string {
 	t.Helper()
 	sh := New("posh")
@@ -15,7 +19,8 @@ func eval(t *testing.T, src string) string {
 	sh.Stdout = &buf
 	sh.Stderr = &buf
 	sh.EvalString(src)
-	return strings.TrimRight(buf.String(), "\n")
+	out := strings.ReplaceAll(buf.String(), "\r", "")
+	return strings.TrimRight(out, "\n")
 }
 
 // evalRaw runs src in the given shell and returns stdout verbatim (no trimming),
