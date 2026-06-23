@@ -331,7 +331,7 @@ func (sh *Shell) evalSubshell(sub *parser.Subshell) int {
 	child := sh.fork()
 	var code int
 	if sub.Body != nil {
-		rIn, rOut, rErr, cleanup, err := applyRedirs(sub.Redirs, sh.Stdin, sh.Stdout, sh.Stderr)
+		rIn, rOut, rErr, cleanup, err := applyRedirs(sh, sub.Redirs, sh.Stdin, sh.Stdout, sh.Stderr)
 		if err != nil {
 			fmt.Fprintf(sh.Stderr, "%s: %v\n", sh.name, err)
 			return 1
@@ -344,7 +344,7 @@ func (sh *Shell) evalSubshell(sub *parser.Subshell) int {
 }
 
 func (sh *Shell) evalGroupCmd(grp *parser.GroupCmd) int {
-	rIn, rOut, rErr, cleanup, err := applyRedirs(grp.Redirs, sh.Stdin, sh.Stdout, sh.Stderr)
+	rIn, rOut, rErr, cleanup, err := applyRedirs(sh, grp.Redirs, sh.Stdin, sh.Stdout, sh.Stderr)
 	if err != nil {
 		fmt.Fprintf(sh.Stderr, "%s: %v\n", sh.name, err)
 		return 1
@@ -364,7 +364,7 @@ func (sh *Shell) evalGroupCmd(grp *parser.GroupCmd) int {
 // ---- compound command evaluators ----
 
 func (sh *Shell) evalIfCmd(cmd *parser.IfCmd) int {
-	rIn, rOut, rErr, cleanup, err := applyRedirs(cmd.Redirs, sh.Stdin, sh.Stdout, sh.Stderr)
+	rIn, rOut, rErr, cleanup, err := applyRedirs(sh, cmd.Redirs, sh.Stdin, sh.Stdout, sh.Stderr)
 	if err != nil {
 		fmt.Fprintf(sh.Stderr, "%s: %v\n", sh.name, err)
 		return 1
@@ -399,7 +399,7 @@ func (sh *Shell) evalIfCmd(cmd *parser.IfCmd) int {
 }
 
 func (sh *Shell) evalForCmd(cmd *parser.ForCmd) (code int) {
-	rIn, rOut, rErr, cleanup, err := applyRedirs(cmd.Redirs, sh.Stdin, sh.Stdout, sh.Stderr)
+	rIn, rOut, rErr, cleanup, err := applyRedirs(sh, cmd.Redirs, sh.Stdin, sh.Stdout, sh.Stderr)
 	if err != nil {
 		fmt.Fprintf(sh.Stderr, "%s: %v\n", sh.name, err)
 		return 1
@@ -453,7 +453,7 @@ func (sh *Shell) evalForCmd(cmd *parser.ForCmd) (code int) {
 }
 
 func (sh *Shell) evalWhileCmd(cmd *parser.WhileCmd) (code int) {
-	rIn, rOut, rErr, cleanup, err := applyRedirs(cmd.Redirs, sh.Stdin, sh.Stdout, sh.Stderr)
+	rIn, rOut, rErr, cleanup, err := applyRedirs(sh, cmd.Redirs, sh.Stdin, sh.Stdout, sh.Stderr)
 	if err != nil {
 		fmt.Fprintf(sh.Stderr, "%s: %v\n", sh.name, err)
 		return 1
@@ -510,7 +510,7 @@ func (sh *Shell) evalWhileCmd(cmd *parser.WhileCmd) (code int) {
 }
 
 func (sh *Shell) evalCaseCmd(cmd *parser.CaseCmd) int {
-	rIn, rOut, rErr, cleanup, err := applyRedirs(cmd.Redirs, sh.Stdin, sh.Stdout, sh.Stderr)
+	rIn, rOut, rErr, cleanup, err := applyRedirs(sh, cmd.Redirs, sh.Stdin, sh.Stdout, sh.Stderr)
 	if err != nil {
 		fmt.Fprintf(sh.Stderr, "%s: %v\n", sh.name, err)
 		return 1
@@ -581,7 +581,7 @@ func (sh *Shell) evalSimpleCmd(cmd *parser.SimpleCmd, stdin io.Reader, stdout, s
 	}
 
 	// Apply redirections
-	rStdin, rStdout, rStderr, cleanup, err := applyRedirs(cmd.Redirs, stdin, stdout, stderr)
+	rStdin, rStdout, rStderr, cleanup, err := applyRedirs(sh, cmd.Redirs, stdin, stdout, stderr)
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: %v\n", sh.name, err)
 		return 1
@@ -799,15 +799,150 @@ func (sh *Shell) fork() *Shell {
 	return child
 }
 
-// preprocessHeredocs inlines heredoc content from multi-line input strings.
-// It replaces <<DELIM / <<-DELIM markers with HEREDOC_CONTENT tokens embedded
-// as a special encoding the evaluator's applyRedirs knows how to handle.
-// This is a line-level preprocessor that runs before tokenization.
+// heredocSpec records a pending heredoc found on a command line.
+type heredocSpec struct {
+	delim      string
+	expand     bool // true = unquoted delimiter: body expands $VAR etc.
+	strip      bool // true for <<-
+	cmdLineIdx int  // index into outLines to inject body marker
+}
+
+// preprocessHeredocs scans a multiline input string for heredoc operators,
+// collects their body lines from subsequent lines, and re-encodes the bodies
+// as inline sentinel markers (\x01...\x02 for expanding, \x03...\x02 for literal)
+// that the lexer emits as HEREDOC_BODY tokens directly after the delimiter token.
 func preprocessHeredocs(input string) string {
-	// Simple implementation: scan for <<DELIM patterns and gather content.
-	// We store collected heredoc content in the Redir.File field by
-	// re-encoding it as a special marker that the lexer will tokenize.
-	// For now, heredoc content is passed through the string unchanged;
-	// applyRedirs handles Redir.File for HEREDOC_OP ops.
-	return input
+	if !strings.Contains(input, "<<") {
+		return input
+	}
+	lines := strings.Split(input, "\n")
+
+	var outLines []string
+	var pending []heredocSpec
+	var pendingBodies [][]string
+
+	for _, line := range lines {
+		if len(pending) > 0 {
+			s := pending[0]
+			checkLine := line
+			if s.strip {
+				checkLine = strings.TrimLeft(line, "\t")
+			}
+			if checkLine == s.delim {
+				// Terminator found: inject body into the command line.
+				body := strings.Join(pendingBodies[0], "\n")
+				if len(pendingBodies[0]) > 0 {
+					body += "\n"
+				}
+				var marker byte = '\x01' // expanding
+				if !s.expand {
+					marker = '\x03' // literal
+				}
+				outLines[s.cmdLineIdx] += " " + string(marker) + body + "\x02"
+				pending = pending[1:]
+				pendingBodies = pendingBodies[1:]
+			} else {
+				bodyLine := line
+				if s.strip {
+					bodyLine = strings.TrimLeft(line, "\t")
+				}
+				pendingBodies[0] = append(pendingBodies[0], bodyLine)
+			}
+		} else {
+			cmdLineIdx := len(outLines)
+			outLines = append(outLines, line)
+			specs := scanLineForHeredocs(line, cmdLineIdx)
+			for _, s := range specs {
+				pending = append(pending, s)
+				pendingBodies = append(pendingBodies, nil)
+			}
+		}
+	}
+
+	return strings.Join(outLines, "\n")
+}
+
+// scanLineForHeredocs finds all heredoc operators on a single command line.
+// It skips <<< (here-strings) and handles single/double-quoted contexts.
+func scanLineForHeredocs(line string, cmdLineIdx int) []heredocSpec {
+	var specs []heredocSpec
+	runes := []rune(line)
+	inSQ, inDQ := false, false
+
+	for i := 0; i < len(runes); i++ {
+		ch := runes[i]
+		if inSQ {
+			if ch == '\'' {
+				inSQ = false
+			}
+			continue
+		}
+		if inDQ {
+			if ch == '"' {
+				inDQ = false
+			}
+			continue
+		}
+		if ch == '#' {
+			break
+		}
+		if ch == '\'' {
+			inSQ = true
+			continue
+		}
+		if ch == '"' {
+			inDQ = true
+			continue
+		}
+		if ch == '<' && i+1 < len(runes) && runes[i+1] == '<' {
+			j := i + 2
+			if j < len(runes) && runes[j] == '<' {
+				// <<< here-string — skip
+				i = j
+				continue
+			}
+			strip := false
+			if j < len(runes) && runes[j] == '-' {
+				strip = true
+				j++
+			}
+			for j < len(runes) && (runes[j] == ' ' || runes[j] == '\t') {
+				j++
+			}
+			if j >= len(runes) {
+				continue
+			}
+			var delim string
+			expand := true
+			qch := runes[j]
+			if qch == '\'' || qch == '"' {
+				expand = false
+				j++
+				start := j
+				for j < len(runes) && runes[j] != qch {
+					j++
+				}
+				delim = string(runes[start:j])
+				if j < len(runes) {
+					j++
+				}
+			} else {
+				start := j
+				for j < len(runes) && runes[j] != ' ' && runes[j] != '\t' {
+					j++
+				}
+				delim = string(runes[start:j])
+			}
+			if delim != "" {
+				specs = append(specs, heredocSpec{
+					delim:      delim,
+					expand:     expand,
+					strip:      strip,
+					cmdLineIdx: cmdLineIdx,
+				})
+			}
+			i = j - 1
+		}
+	}
+	return specs
 }

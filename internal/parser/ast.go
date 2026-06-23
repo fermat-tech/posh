@@ -10,10 +10,11 @@ type Node interface {
 
 // Redir represents a single I/O redirection on a command.
 type Redir struct {
-	Op    lexer.TokenType
-	File  string // target filename; for HEREDOC_OP this holds the content
-	Delim string // heredoc delimiter (for <<- strip mode)
-	Strip bool   // true for <<-
+	Op     lexer.TokenType
+	File   string // target filename; for HEREDOC_OP/HERESTRING_OP this holds the content
+	Delim  string // heredoc delimiter (for <<- strip mode)
+	Strip  bool   // true for <<-
+	Expand bool   // true = expand $VAR/$(cmd) in heredoc body (unquoted delimiter)
 	// Fd1, Fd2 carry fd numbers for the generalised redirect ops:
 	//   REDIR_FD_OUT / FD_APPEND / FD_IN  →  Fd1 = N  (the "N" in N>file)
 	//   REDIR_DUP_OUT / DUP_IN            →  Fd1 = src, Fd2 = dst  (N>&M)

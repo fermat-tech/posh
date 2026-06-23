@@ -35,6 +35,8 @@ const (
 	REDIR_CLOSE_IN                    // N<&-;  Val = "N"
 	HEREDOC_OP                        // <<
 	HEREDOC_STRIP_OP                  // <<-
+	HEREDOC_BODY                      // inline heredoc body injected by preprocessHeredocs
+	HERESTRING_OP                     // <<<
 	LPAREN                            // (
 	RPAREN                            // )
 	LBRACE                            // {
@@ -92,6 +94,10 @@ func (t TokenType) String() string {
 		return "<<"
 	case HEREDOC_STRIP_OP:
 		return "<<-"
+	case HEREDOC_BODY:
+		return "HEREDOC_BODY"
+	case HERESTRING_OP:
+		return "<<<"
 	case LPAREN:
 		return "("
 	case RPAREN:
@@ -112,8 +118,9 @@ func (t TokenType) String() string {
 
 // Token is a single lexical unit.
 type Token struct {
-	Type TokenType
-	Val  string // raw text (for WORD/ASSIGN); empty for punctuation tokens
+	Type   TokenType
+	Val    string // raw text (for WORD/ASSIGN); empty for punctuation tokens
+	Quoted bool   // for HEREDOC_BODY: true = literal body (no expansion)
 }
 
 // Lexer holds the tokenizer state.
@@ -335,13 +342,35 @@ func (l *Lexer) Tokenize() []Token {
 			}
 			wordPos = false
 
+		case ch == '\x01' || ch == '\x03':
+			// Inline heredoc body injected by preprocessHeredocs.
+			// \x01 = expanding body, \x03 = literal body.
+			quoted := ch == '\x03'
+			l.advance()
+			var sb strings.Builder
+			for {
+				c, ok := l.peek()
+				if !ok || c == '\x02' {
+					if ok {
+						l.advance()
+					}
+					break
+				}
+				l.advance()
+				sb.WriteRune(c)
+			}
+			tokens = append(tokens, Token{Type: HEREDOC_BODY, Val: sb.String(), Quoted: quoted})
+
 		case ch == '<':
 			l.advance()
 			next, _ := l.peek()
 			if next == '<' {
 				l.advance()
 				n2, _ := l.peek()
-				if n2 == '-' {
+				if n2 == '<' {
+					l.advance()
+					tokens = append(tokens, Token{Type: HERESTRING_OP})
+				} else if n2 == '-' {
 					l.advance()
 					tokens = append(tokens, Token{Type: HEREDOC_STRIP_OP})
 				} else {
@@ -903,7 +932,8 @@ func isWordStop(ch rune) bool {
 	switch ch {
 	case ' ', '\t', '\r', '\n',
 		'|', '&', ';', '(', ')', '}',
-		'>', '<', '#':
+		'>', '<', '#',
+		'\x01', '\x02', '\x03': // heredoc body sentinels
 		return true
 	}
 	return false

@@ -231,6 +231,42 @@ func (sh *Shell) expandUnquoted(s string) string {
 	return sb.String()
 }
 
+// expandHeredocBody expands an unquoted-delimiter heredoc body:
+// $VAR, $(cmd), and $((expr)) are expanded; backslash escapes \$, \\, \'
+// suppress expansion; \<newline> is a line continuation (joins lines).
+func (sh *Shell) expandHeredocBody(body string) string {
+	var sb strings.Builder
+	runes := []rune(body)
+	i := 0
+	for i < len(runes) {
+		ch := runes[i]
+		if ch == '\\' && i+1 < len(runes) {
+			next := runes[i+1]
+			switch next {
+			case '\\', '$', '\'':
+				sb.WriteRune(next)
+				i += 2
+				continue
+			case '\n': // line continuation
+				i += 2
+				continue
+			}
+			sb.WriteRune('\\')
+			i++
+			continue
+		}
+		if ch == '$' {
+			val, n := sh.expandDollar(runes, i)
+			sb.WriteString(val)
+			i += n
+			continue
+		}
+		sb.WriteRune(ch)
+		i++
+	}
+	return sb.String()
+}
+
 // expandDollar processes a $ substitution starting at runes[i].
 // Returns the expanded string and the number of runes consumed.
 func (sh *Shell) expandDollar(runes []rune, i int) (string, int) {

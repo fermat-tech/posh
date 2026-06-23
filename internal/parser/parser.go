@@ -870,12 +870,24 @@ func (p *Parser) parseSimpleCmd() (*SimpleCmd, error) {
 				return nil, &ParseError{"expected heredoc delimiter"}
 			}
 			p.consume()
-			// Content is stored in File field; the REPL/EvalString preprocesses heredocs
-			cmd.Redirs = append(cmd.Redirs, Redir{
-				Op:    lexer.HEREDOC_OP,
-				Delim: delim.Val,
-				Strip: strip,
-			})
+			redir := Redir{Op: lexer.HEREDOC_OP, Delim: delim.Val, Strip: strip}
+			// Check for inline body injected by preprocessHeredocs.
+			if p.peekRaw().Type == lexer.HEREDOC_BODY {
+				body := p.peekRaw()
+				p.consumeNonNL()
+				redir.File = body.Val
+				redir.Expand = !body.Quoted
+			}
+			cmd.Redirs = append(cmd.Redirs, redir)
+
+		case lexer.HERESTRING_OP:
+			p.consume()
+			word := p.peekRaw()
+			if word.Type != lexer.WORD {
+				return nil, &ParseError{"expected word after <<<"}
+			}
+			p.consumeNonNL()
+			cmd.Redirs = append(cmd.Redirs, Redir{Op: lexer.HERESTRING_OP, File: word.Val})
 
 		default:
 			goto done
@@ -916,6 +928,28 @@ func (p *Parser) parseRedirs() []Redir {
 			fd1, _ := strconv.Atoi(t.Val)
 			p.consumeNonNL()
 			redirs = append(redirs, Redir{Op: t.Type, Fd1: fd1})
+		case lexer.HEREDOC_OP, lexer.HEREDOC_STRIP_OP:
+			strip := t.Type == lexer.HEREDOC_STRIP_OP
+			p.consumeNonNL()
+			delim := p.peek()
+			if delim.Type == lexer.WORD {
+				p.consumeNonNL()
+				redir := Redir{Op: lexer.HEREDOC_OP, Delim: delim.Val, Strip: strip}
+				if p.peek().Type == lexer.HEREDOC_BODY {
+					body := p.peek()
+					p.consumeNonNL()
+					redir.File = body.Val
+					redir.Expand = !body.Quoted
+				}
+				redirs = append(redirs, redir)
+			}
+		case lexer.HERESTRING_OP:
+			p.consumeNonNL()
+			word := p.peek()
+			if word.Type == lexer.WORD {
+				p.consumeNonNL()
+				redirs = append(redirs, Redir{Op: lexer.HERESTRING_OP, File: word.Val})
+			}
 		default:
 			return redirs
 		}
@@ -943,6 +977,103 @@ func toList(n Node) *List {
 		return l
 	}
 	return &List{First: n}
+}
+
+// heredocPending returns true if input has a heredoc operator whose body has
+// not yet been terminated by the matching delimiter line.
+func heredocPending(input string) bool {
+	type spec struct {
+		delim string
+		strip bool
+	}
+	lines := strings.Split(input, "\n")
+	var pending []spec
+
+	for _, line := range lines {
+		if len(pending) > 0 {
+			s := pending[0]
+			check := line
+			if s.strip {
+				check = strings.TrimLeft(line, "\t")
+			}
+			if check == s.delim {
+				pending = pending[1:]
+			}
+			continue
+		}
+		// Scan line for << operators (skip <<< here-strings).
+		runes := []rune(line)
+		inSQ, inDQ := false, false
+		for i := 0; i < len(runes); i++ {
+			ch := runes[i]
+			if inSQ {
+				if ch == '\'' {
+					inSQ = false
+				}
+				continue
+			}
+			if inDQ {
+				if ch == '"' {
+					inDQ = false
+				}
+				continue
+			}
+			if ch == '#' {
+				break
+			}
+			if ch == '\'' {
+				inSQ = true
+				continue
+			}
+			if ch == '"' {
+				inDQ = true
+				continue
+			}
+			if ch == '<' && i+1 < len(runes) && runes[i+1] == '<' {
+				j := i + 2
+				if j < len(runes) && runes[j] == '<' {
+					// <<< herestring — skip
+					i = j
+					continue
+				}
+				strip := false
+				if j < len(runes) && runes[j] == '-' {
+					strip = true
+					j++
+				}
+				for j < len(runes) && (runes[j] == ' ' || runes[j] == '\t') {
+					j++
+				}
+				if j >= len(runes) {
+					continue
+				}
+				var delim string
+				qch := runes[j]
+				if qch == '\'' || qch == '"' {
+					j++
+					start := j
+					for j < len(runes) && runes[j] != qch {
+						j++
+					}
+					delim = string(runes[start:j])
+					if j < len(runes) {
+						j++
+					}
+				} else {
+					start := j
+					for j < len(runes) && runes[j] != ' ' && runes[j] != '\t' {
+						j++
+					}
+					delim = string(runes[start:j])
+				}
+				if delim != "" {
+					pending = append(pending, spec{delim: delim, strip: strip})
+				}
+				i = j - 1
+			}
+		}
+	}
+	return len(pending) > 0
 }
 
 // NeedsContinuation reports whether the input string looks incomplete.
@@ -994,5 +1125,9 @@ func NeedsContinuation(input string) bool {
 			parenDepth--
 		}
 	}
-	return braceDepth > 0 || parenDepth > 0
+	if braceDepth > 0 || parenDepth > 0 {
+		return true
+	}
+
+	return heredocPending(input)
 }

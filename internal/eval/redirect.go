@@ -24,7 +24,7 @@ func writerForFd(fd int, stdout, stderr io.Writer) io.Writer {
 // applyRedirs opens/creates files for all redirections in cmd and wires them
 // to the appropriate file descriptors of the exec.Cmd.
 // It returns a cleanup function that closes any files it opened.
-func applyRedirs(redirs []parser.Redir, stdin io.Reader, stdout, stderr io.Writer) (
+func applyRedirs(sh *Shell, redirs []parser.Redir, stdin io.Reader, stdout, stderr io.Writer) (
 	io.Reader, io.Writer, io.Writer, func(), error,
 ) {
 	var closers []io.Closer
@@ -175,7 +175,19 @@ func applyRedirs(redirs []parser.Redir, stdin io.Reader, stdout, stderr io.Write
 			}
 
 		case lexer.HEREDOC_OP:
-			stdin = strings.NewReader(r.File)
+			body := r.File
+			if r.Expand && sh != nil {
+				body = sh.expandHeredocBody(body)
+			}
+			stdin = strings.NewReader(body)
+
+		case lexer.HERESTRING_OP:
+			word := r.File
+			if sh != nil {
+				word = sh.expandWord(word)
+				word = unprotectWord(word)
+			}
+			stdin = strings.NewReader(word + "\n")
 		}
 	}
 
