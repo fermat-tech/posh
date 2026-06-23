@@ -281,6 +281,17 @@ func (sh *Shell) expandDollar(runes []rune, i int) (string, int) {
 			for end < len(runes) && (unicode.IsLetter(runes[end]) || unicode.IsDigit(runes[end]) || runes[end] == '_') {
 				end++
 			}
+			// Allow a trailing (...) for Windows env vars like ProgramFiles(x86).
+			// Unambiguous here because command substitution requires $( not letter+(.
+			if end < len(runes) && runes[end] == '(' {
+				j := end + 1
+				for j < len(runes) && runes[j] != ')' && runes[j] != '\n' {
+					j++
+				}
+				if j < len(runes) && runes[j] == ')' {
+					end = j + 1
+				}
+			}
 			name := string(runes[i+1 : end])
 			return sh.getVar(name), end - i
 		}
