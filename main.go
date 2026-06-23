@@ -28,6 +28,20 @@ var colorStdout = colorable.NewColorableStdout()
 var colorStderr = colorable.NewColorableStderr()
 
 func main() {
+	// A top-level `exit` unwinds here as a shellExit panic. Recover it and exit
+	// the process with the requested status; deferred cleanup (e.g. history
+	// saving in the REPL) has already run during unwinding. Scripts and
+	// subshells contain their own `exit` lower down, so only a session-level
+	// exit reaches this point.
+	defer func() {
+		if r := recover(); r != nil {
+			if code, ok := eval.ExitCode(r); ok {
+				os.Exit(code)
+			}
+			panic(r)
+		}
+	}()
+
 	args := os.Args[1:]
 	sh := eval.New(progName)
 	sh.Stdout = colorStdout

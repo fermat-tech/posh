@@ -272,16 +272,18 @@ func unescapeShellString(s string) string {
 
 // ---- exit ----
 
-func builtinExit(_ *Shell, args []string, _ io.Reader, _, _ io.Writer) int {
-	code := 0
+func builtinExit(sh *Shell, args []string, _ io.Reader, _, _ io.Writer) int {
+	code := sh.lastExit // `exit` with no argument uses $?
 	if len(args) > 0 {
 		n, err := strconv.Atoi(args[0])
 		if err == nil {
 			code = n
 		}
 	}
-	os.Exit(code)
-	return code
+	// Unwind via panic so the exit is contained to the current shell context
+	// (subshell, command substitution, or a script run as a child). Only the
+	// top-level Run/REPL turns this into an actual process exit.
+	panic(shellExit{code})
 }
 
 // ---- export, unset, env, set ----

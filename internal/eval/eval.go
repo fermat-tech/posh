@@ -20,6 +20,41 @@ type loopBreak struct{ levels int }
 type loopContinue struct{ levels int }
 type funcReturn struct{ code int }
 
+// shellExit is raised by the `exit` builtin. It unwinds the current shell
+// execution context. Nested contexts that represent a separate "shell" — a
+// subshell ( ... ), a command substitution, a background/pipeline goroutine, or
+// a posh script run as a child — contain it via catchExit and report it as an
+// ordinary exit status. At the top level it propagates out so the session ends.
+type shellExit struct{ code int }
+
+// catchExit runs fn and converts a shellExit panic into a returned exit code.
+// It is used at every boundary where `exit` must terminate only the nested
+// context rather than the whole process. Other panics propagate unchanged.
+func catchExit(fn func() int) (code int) {
+	defer func() {
+		if r := recover(); r != nil {
+			if ex, ok := r.(shellExit); ok {
+				code = ex.code
+				return
+			}
+			panic(r)
+		}
+	}()
+	return fn()
+}
+
+// ExitCode reports whether a recovered panic value is a shell `exit` request
+// and, if so, the status code to exit with. The process owner (main and the
+// REPL loop) calls this from a top-level recover so that `exit` ends the
+// session cleanly — letting deferred cleanup such as history saving run during
+// unwinding — instead of os.Exit firing from deep inside the evaluator.
+func ExitCode(r any) (code int, ok bool) {
+	if ex, isExit := r.(shellExit); isExit {
+		return ex.code, true
+	}
+	return 0, false
+}
+
 // Shell holds the execution state for a posh session.
 type Shell struct {
 	name      string            // argv[0] / $0
@@ -203,6 +238,11 @@ func (sh *Shell) evalList(list *parser.List) int {
 	if bg {
 		code = 0
 	}
+	// Keep $? current after each statement so later commands in the same list
+	// (e.g. echo "$?") observe the right status. Compound commands such as a
+	// bare subshell don't route through evalPipeline, which is the other place
+	// lastExit is maintained.
+	sh.lastExit = code
 
 	for i, elem := range list.Elems {
 		if elem.Node == nil {
@@ -225,6 +265,7 @@ func (sh *Shell) evalList(list *parser.List) int {
 		if bg {
 			code = 0
 		}
+		sh.lastExit = code
 	}
 	return code
 }
@@ -236,7 +277,8 @@ func (sh *Shell) evalNode(n parser.Node, background bool) int {
 	if background {
 		child := sh.fork()
 		child.isBackground = true
-		go child.Eval(n)
+		// `exit` in a background job ends that job only.
+		go catchExit(func() int { return child.Eval(n) })
 		return 0
 	}
 	return sh.Eval(n)
@@ -280,7 +322,11 @@ func (sh *Shell) evalPipeline(pipe *parser.Pipeline) int {
 		go func(idx int, node parser.Node, in io.Reader, out io.Writer) {
 			sub := sh.fork()
 			sub.Stdin, sub.Stdout, sub.Stderr = in, out, sh.Stderr
-			code := sub.evalNodeIO(node, in, out, sh.Stderr)
+			// Each pipeline stage is its own subshell, so `exit` ends only
+			// that stage (and must not escape the goroutine as a panic).
+			code := catchExit(func() int {
+				return sub.evalNodeIO(node, in, out, sh.Stderr)
+			})
 			// Close the write end so the next stage sees EOF.
 			if idx < n-1 {
 				pipeW[idx].Close()
@@ -338,7 +384,8 @@ func (sh *Shell) evalSubshell(sub *parser.Subshell) int {
 		}
 		defer cleanup()
 		child.Stdin, child.Stdout, child.Stderr = rIn, rOut, rErr
-		code = child.evalList(sub.Body)
+		// `exit` inside ( ... ) exits only the subshell.
+		code = catchExit(func() int { return child.evalList(sub.Body) })
 	}
 	return code
 }
@@ -757,14 +804,17 @@ func (sh *Shell) tryRunAsScript(path string, args []string, stdin io.Reader, std
 	sub.Stdout = stdout
 	sub.Stderr = stderr
 	sub.SetPosParams(args)
-	return sub.EvalString(src)
+	// A script runs as a child: its `exit` returns a status to us, it does not
+	// terminate the interactive session that launched it.
+	return catchExit(func() int { return sub.EvalString(src) })
 }
 
 func (sh *Shell) runCaptured(s string) (string, error) {
 	var buf bytes.Buffer
 	sub := sh.fork()
 	sub.Stdout = &buf
-	sub.EvalString(s)
+	// `exit` inside $(...) ends the substitution, not the parent shell.
+	catchExit(func() int { return sub.EvalString(s) })
 	return buf.String(), nil
 }
 
