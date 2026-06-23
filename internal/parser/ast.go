@@ -10,10 +10,16 @@ type Node interface {
 
 // Redir represents a single I/O redirection on a command.
 type Redir struct {
-	Op      lexer.TokenType // REDIR_OUT, REDIR_APPEND, REDIR_IN, REDIR_ERR, REDIR_ERR_APPEND, REDIR_BOTH, HEREDOC_OP
-	File    string          // target filename; for HEREDOC_OP this holds the content
-	Delim   string          // heredoc delimiter (for strip-mode detection)
-	Strip   bool            // true for <<- (strip leading tabs)
+	Op    lexer.TokenType
+	File  string // target filename; for HEREDOC_OP this holds the content
+	Delim string // heredoc delimiter (for <<- strip mode)
+	Strip bool   // true for <<-
+	// Fd1, Fd2 carry fd numbers for the generalised redirect ops:
+	//   REDIR_FD_OUT / FD_APPEND / FD_IN  →  Fd1 = N  (the "N" in N>file)
+	//   REDIR_DUP_OUT / DUP_IN            →  Fd1 = src, Fd2 = dst  (N>&M)
+	//   REDIR_CLOSE_OUT / CLOSE_IN        →  Fd1 = fd to close
+	Fd1 int
+	Fd2 int
 }
 
 // SimpleCmd is a single external command or built-in invocation.

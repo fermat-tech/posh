@@ -3,6 +3,7 @@ package parser
 import (
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/fermat-tech/posh/internal/lexer"
@@ -731,15 +732,30 @@ func (p *Parser) parseSimpleCmd() (*SimpleCmd, error) {
 			cmd.Words = append(cmd.Words, t.Val)
 
 		case lexer.REDIR_OUT, lexer.REDIR_APPEND, lexer.REDIR_IN,
-			lexer.REDIR_ERR, lexer.REDIR_ERR_APPEND, lexer.REDIR_BOTH:
+			lexer.REDIR_ERR, lexer.REDIR_ERR_APPEND, lexer.REDIR_BOTH, lexer.REDIR_BOTH_APPEND,
+			lexer.REDIR_FD_OUT, lexer.REDIR_FD_APPEND, lexer.REDIR_FD_IN:
 			op := t.Type
+			fd1, _ := strconv.Atoi(t.Val)
 			p.consume()
 			file := p.peek()
 			if file.Type != lexer.WORD {
 				return nil, &ParseError{fmt.Sprintf("expected filename after %s", op)}
 			}
 			p.consume()
-			cmd.Redirs = append(cmd.Redirs, Redir{Op: op, File: file.Val})
+			cmd.Redirs = append(cmd.Redirs, Redir{Op: op, File: file.Val, Fd1: fd1})
+
+		case lexer.REDIR_DUP_OUT, lexer.REDIR_DUP_IN:
+			r, err := parseDupRedir(t)
+			if err != nil {
+				return nil, err
+			}
+			p.consume()
+			cmd.Redirs = append(cmd.Redirs, r)
+
+		case lexer.REDIR_CLOSE_OUT, lexer.REDIR_CLOSE_IN:
+			fd1, _ := strconv.Atoi(t.Val)
+			p.consume()
+			cmd.Redirs = append(cmd.Redirs, Redir{Op: t.Type, Fd1: fd1})
 
 		case lexer.HEREDOC_OP, lexer.HEREDOC_STRIP_OP:
 			strip := t.Type == lexer.HEREDOC_STRIP_OP
@@ -775,18 +791,41 @@ func (p *Parser) parseRedirs() []Redir {
 		t := p.peek()
 		switch t.Type {
 		case lexer.REDIR_OUT, lexer.REDIR_APPEND, lexer.REDIR_IN,
-			lexer.REDIR_ERR, lexer.REDIR_ERR_APPEND, lexer.REDIR_BOTH:
+			lexer.REDIR_ERR, lexer.REDIR_ERR_APPEND, lexer.REDIR_BOTH, lexer.REDIR_BOTH_APPEND,
+			lexer.REDIR_FD_OUT, lexer.REDIR_FD_APPEND, lexer.REDIR_FD_IN:
 			op := t.Type
+			fd1, _ := strconv.Atoi(t.Val)
 			p.consumeNonNL()
 			file := p.peek()
 			if file.Type == lexer.WORD {
 				p.consumeNonNL()
-				redirs = append(redirs, Redir{Op: op, File: file.Val})
+				redirs = append(redirs, Redir{Op: op, File: file.Val, Fd1: fd1})
 			}
+		case lexer.REDIR_DUP_OUT, lexer.REDIR_DUP_IN:
+			r, err := parseDupRedir(t)
+			if err == nil {
+				p.consumeNonNL()
+				redirs = append(redirs, r)
+			}
+		case lexer.REDIR_CLOSE_OUT, lexer.REDIR_CLOSE_IN:
+			fd1, _ := strconv.Atoi(t.Val)
+			p.consumeNonNL()
+			redirs = append(redirs, Redir{Op: t.Type, Fd1: fd1})
 		default:
 			return redirs
 		}
 	}
+}
+
+// parseDupRedir parses a REDIR_DUP_OUT or REDIR_DUP_IN token.
+// Token Val is "src:dst" e.g. "2:1" for 2>&1.
+func parseDupRedir(t lexer.Token) (Redir, error) {
+	var src, dst int
+	n, err := fmt.Sscanf(t.Val, "%d:%d", &src, &dst)
+	if err != nil || n != 2 {
+		return Redir{}, &ParseError{fmt.Sprintf("malformed fd-dup token %q", t.Val)}
+	}
+	return Redir{Op: t.Type, Fd1: src, Fd2: dst}, nil
 }
 
 // ---- helpers ----

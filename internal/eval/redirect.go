@@ -10,6 +10,17 @@ import (
 	"github.com/fermat-tech/posh/internal/parser"
 )
 
+// writerForFd returns the current writer for fd 1 (stdout) or 2 (stderr).
+func writerForFd(fd int, stdout, stderr io.Writer) io.Writer {
+	switch fd {
+	case 1:
+		return stdout
+	case 2:
+		return stderr
+	}
+	return nil
+}
+
 // applyRedirs opens/creates files for all redirections in cmd and wires them
 // to the appropriate file descriptors of the exec.Cmd.
 // It returns a cleanup function that closes any files it opened.
@@ -79,6 +90,89 @@ func applyRedirs(redirs []parser.Redir, stdin io.Reader, stdout, stderr io.Write
 			closers = append(closers, f)
 			stdout = f
 			stderr = f
+
+		case lexer.REDIR_BOTH_APPEND:
+			f, err := os.OpenFile(r.File, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0666)
+			if err != nil {
+				cleanup()
+				return nil, nil, nil, nil, fmt.Errorf("cannot open %q: %w", r.File, err)
+			}
+			closers = append(closers, f)
+			stdout = f
+			stderr = f
+
+		case lexer.REDIR_FD_OUT:
+			f, err := os.Create(r.File)
+			if err != nil {
+				cleanup()
+				return nil, nil, nil, nil, fmt.Errorf("cannot open %q: %w", r.File, err)
+			}
+			closers = append(closers, f)
+			switch r.Fd1 {
+			case 1:
+				stdout = f
+			case 2:
+				stderr = f
+			}
+
+		case lexer.REDIR_FD_APPEND:
+			f, err := os.OpenFile(r.File, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0666)
+			if err != nil {
+				cleanup()
+				return nil, nil, nil, nil, fmt.Errorf("cannot open %q: %w", r.File, err)
+			}
+			closers = append(closers, f)
+			switch r.Fd1 {
+			case 1:
+				stdout = f
+			case 2:
+				stderr = f
+			}
+
+		case lexer.REDIR_FD_IN:
+			f, err := os.Open(r.File)
+			if err != nil {
+				cleanup()
+				return nil, nil, nil, nil, fmt.Errorf("cannot open %q: %w", r.File, err)
+			}
+			closers = append(closers, f)
+			if r.Fd1 == 0 {
+				stdin = f
+			}
+
+		case lexer.REDIR_DUP_OUT:
+			// N>&M — make fd N write to the same place as fd M.
+			dst := writerForFd(r.Fd2, stdout, stderr)
+			if dst != nil {
+				switch r.Fd1 {
+				case 1:
+					stdout = dst
+				case 2:
+					stderr = dst
+				}
+			}
+
+		case lexer.REDIR_DUP_IN:
+			// N<&M — make fd N read from the same place as fd M.
+			if r.Fd2 == 0 {
+				switch r.Fd1 {
+				case 0:
+					// 0<&0 — no-op
+				}
+			}
+
+		case lexer.REDIR_CLOSE_OUT:
+			switch r.Fd1 {
+			case 1:
+				stdout = io.Discard
+			case 2:
+				stderr = io.Discard
+			}
+
+		case lexer.REDIR_CLOSE_IN:
+			if r.Fd1 == 0 {
+				stdin = strings.NewReader("")
+			}
 
 		case lexer.HEREDOC_OP:
 			stdin = strings.NewReader(r.File)

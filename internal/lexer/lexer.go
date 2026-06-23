@@ -3,6 +3,7 @@ package lexer
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 	"unicode"
 )
@@ -11,27 +12,35 @@ import (
 type TokenType int
 
 const (
-	WORD          TokenType = iota // bare word, quoted string, or substitution
-	ASSIGN                         // VAR=val (only at command start position)
-	PIPE                           // |
-	AND                            // &&
-	OR                             // ||
-	SEMI                           // ;
-	AMP                            // &
-	REDIR_OUT                      // >
-	REDIR_APPEND                   // >>
-	REDIR_IN                       // <
-	REDIR_ERR                      // 2>
-	REDIR_ERR_APPEND               // 2>>
-	REDIR_BOTH                     // &> or 2>&1
-	HEREDOC_OP                     // <<
-	HEREDOC_STRIP_OP               // <<-
-	LPAREN                         // (
-	RPAREN                         // )
-	LBRACE                         // {
-	RBRACE                         // }
-	DLARITH                        // (( arithmetic command ))
-	NEWLINE                        // \n
+	WORD             TokenType = iota // bare word, quoted string, or substitution
+	ASSIGN                            // VAR=val (only at command start position)
+	PIPE                              // |
+	AND                               // &&
+	OR                                // ||
+	SEMI                              // ;
+	AMP                               // &
+	REDIR_OUT                         // > or 1>
+	REDIR_APPEND                      // >> or 1>>
+	REDIR_IN                          // < or 0<
+	REDIR_ERR                         // 2>
+	REDIR_ERR_APPEND                  // 2>>
+	REDIR_BOTH                        // &>
+	REDIR_BOTH_APPEND                 // &>>
+	REDIR_FD_OUT                      // N>file  (N≠1,2); Val = "N"
+	REDIR_FD_APPEND                   // N>>file (N≠1,2); Val = "N"
+	REDIR_FD_IN                       // N<file  (N≠0);   Val = "N"
+	REDIR_DUP_OUT                     // N>&M;  Val = "N:M"
+	REDIR_DUP_IN                      // N<&M;  Val = "N:M"
+	REDIR_CLOSE_OUT                   // N>&-;  Val = "N"
+	REDIR_CLOSE_IN                    // N<&-;  Val = "N"
+	HEREDOC_OP                        // <<
+	HEREDOC_STRIP_OP                  // <<-
+	LPAREN                            // (
+	RPAREN                            // )
+	LBRACE                            // {
+	RBRACE                            // }
+	DLARITH                           // (( arithmetic command ))
+	NEWLINE                           // \n
 	EOF
 )
 
@@ -63,6 +72,22 @@ func (t TokenType) String() string {
 		return "2>>"
 	case REDIR_BOTH:
 		return "&>"
+	case REDIR_BOTH_APPEND:
+		return "&>>"
+	case REDIR_FD_OUT:
+		return "N>"
+	case REDIR_FD_APPEND:
+		return "N>>"
+	case REDIR_FD_IN:
+		return "N<"
+	case REDIR_DUP_OUT:
+		return "N>&M"
+	case REDIR_DUP_IN:
+		return "N<&M"
+	case REDIR_CLOSE_OUT:
+		return "N>&-"
+	case REDIR_CLOSE_IN:
+		return "N<&-"
 	case HEREDOC_OP:
 		return "<<"
 	case HEREDOC_STRIP_OP:
@@ -273,7 +298,12 @@ func (l *Lexer) Tokenize() []Token {
 				tokens = append(tokens, Token{Type: AND})
 			} else if next == '>' {
 				l.advance()
-				tokens = append(tokens, Token{Type: REDIR_BOTH})
+				if n2, _ := l.peek(); n2 == '>' {
+					l.advance()
+					tokens = append(tokens, Token{Type: REDIR_BOTH_APPEND})
+				} else {
+					tokens = append(tokens, Token{Type: REDIR_BOTH})
+				}
 			} else {
 				tokens = append(tokens, Token{Type: AMP})
 			}
@@ -285,6 +315,21 @@ func (l *Lexer) Tokenize() []Token {
 			if next == '>' {
 				l.advance()
 				tokens = append(tokens, Token{Type: REDIR_APPEND})
+			} else if next == '&' {
+				// >&N  →  1>&N (dup stdout to fd N)
+				// >&-  →  close stdout
+				n2, ok2 := l.peekAt(1)
+				if ok2 && n2 >= '0' && n2 <= '9' {
+					l.advance() // &
+					l.advance() // digit
+					tokens = append(tokens, Token{Type: REDIR_DUP_OUT, Val: "1:" + string(n2)})
+				} else if ok2 && n2 == '-' {
+					l.advance() // &
+					l.advance() // -
+					tokens = append(tokens, Token{Type: REDIR_CLOSE_OUT, Val: "1"})
+				} else {
+					tokens = append(tokens, Token{Type: REDIR_OUT})
+				}
 			} else {
 				tokens = append(tokens, Token{Type: REDIR_OUT})
 			}
@@ -308,30 +353,63 @@ func (l *Lexer) Tokenize() []Token {
 			wordPos = false
 
 		default:
-			// Check for 2> and 2>>
-			if ch == '2' {
-				next, _ := l.peekAt(1)
-				if next == '>' {
-					l.advance() // consume '2'
-					l.advance() // consume '>'
+			// N> N>> N< N>&M N<&M N>&- N<&-  for any single digit N
+			if ch >= '0' && ch <= '9' {
+				if nxt, ok2 := l.peekAt(1); ok2 && (nxt == '>' || nxt == '<') {
+					fd := int(ch - '0')
+					l.advance()      // consume digit
+					dir := l.advance() // consume > or <
+
 					n2, _ := l.peek()
-					if n2 == '>' {
-						l.advance()
-						tokens = append(tokens, Token{Type: REDIR_ERR_APPEND})
-						wordPos = false
-						continue
-					}
-					if n2 == '&' {
-						n3, _ := l.peekAt(1)
-						if n3 == '1' {
-							l.advance() // &
-							l.advance() // 1
-							tokens = append(tokens, Token{Type: REDIR_BOTH})
-							wordPos = false
-							continue
+
+					if dir == '>' {
+						if n2 == '>' { // N>>
+							l.advance()
+							switch fd {
+							case 1:
+								tokens = append(tokens, Token{Type: REDIR_APPEND})
+							case 2:
+								tokens = append(tokens, Token{Type: REDIR_ERR_APPEND})
+							default:
+								tokens = append(tokens, Token{Type: REDIR_FD_APPEND, Val: strconv.Itoa(fd)})
+							}
+						} else if n2 == '&' { // N>&M or N>&-
+							n3, ok3 := l.peekAt(1)
+							if ok3 && n3 == '-' {
+								l.advance()
+								l.advance()
+								tokens = append(tokens, Token{Type: REDIR_CLOSE_OUT, Val: strconv.Itoa(fd)})
+							} else if ok3 && n3 >= '0' && n3 <= '9' {
+								l.advance()
+								l.advance()
+								tokens = append(tokens, Token{Type: REDIR_DUP_OUT,
+									Val: strconv.Itoa(fd) + ":" + string(n3)})
+							} else {
+								// N>& with no valid target — treat as plain N>
+								tokens = append(tokens, l.fdOutToken(fd))
+							}
+						} else { // N>file
+							tokens = append(tokens, l.fdOutToken(fd))
+						}
+					} else { // dir == '<'
+						if n2 == '&' { // N<&M or N<&-
+							n3, ok3 := l.peekAt(1)
+							if ok3 && n3 == '-' {
+								l.advance()
+								l.advance()
+								tokens = append(tokens, Token{Type: REDIR_CLOSE_IN, Val: strconv.Itoa(fd)})
+							} else if ok3 && n3 >= '0' && n3 <= '9' {
+								l.advance()
+								l.advance()
+								tokens = append(tokens, Token{Type: REDIR_DUP_IN,
+									Val: strconv.Itoa(fd) + ":" + string(n3)})
+							} else {
+								tokens = append(tokens, l.fdInToken(fd))
+							}
+						} else { // N<file
+							tokens = append(tokens, l.fdInToken(fd))
 						}
 					}
-					tokens = append(tokens, Token{Type: REDIR_ERR})
 					wordPos = false
 					continue
 				}
@@ -798,6 +876,27 @@ func (l *Lexer) readUntilClose(open, close rune, sb *strings.Builder) {
 			depth--
 		}
 	}
+}
+
+// fdOutToken returns the appropriate output-redirect token for fd N.
+// fd 1 maps to REDIR_OUT, fd 2 to REDIR_ERR, anything else to REDIR_FD_OUT.
+func (l *Lexer) fdOutToken(fd int) Token {
+	switch fd {
+	case 1:
+		return Token{Type: REDIR_OUT}
+	case 2:
+		return Token{Type: REDIR_ERR}
+	default:
+		return Token{Type: REDIR_FD_OUT, Val: strconv.Itoa(fd)}
+	}
+}
+
+// fdInToken returns the appropriate input-redirect token for fd N.
+func (l *Lexer) fdInToken(fd int) Token {
+	if fd == 0 {
+		return Token{Type: REDIR_IN}
+	}
+	return Token{Type: REDIR_FD_IN, Val: strconv.Itoa(fd)}
 }
 
 func isWordStop(ch rune) bool {
