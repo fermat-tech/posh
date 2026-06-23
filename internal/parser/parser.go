@@ -222,18 +222,27 @@ func (p *Parser) parseCommandNode() (Node, error) {
 
 	// Group command { list; }
 	if t.Type == lexer.LBRACE {
-		return p.parseGroupCmd()
+		node, err := p.parseGroupCmd()
+		if err != nil || node == nil {
+			return node, err
+		}
+		return p.maybeWrapInPipeline(node)
 	}
 
 	// Subshell ( list )
 	if t.Type == lexer.LPAREN {
-		return p.parseSubshell()
+		node, err := p.parseSubshell()
+		if err != nil || node == nil {
+			return node, err
+		}
+		return p.maybeWrapInPipeline(node)
 	}
 
 	// Arithmetic command (( expr ))
 	if t.Type == lexer.DLARITH {
 		tok := p.consume()
-		return &ArithCmd{Expr: tok.Val}, nil
+		node := &ArithCmd{Expr: tok.Val}
+		return p.maybeWrapInPipeline(node)
 	}
 
 	// Compound commands and function definitions
@@ -242,31 +251,82 @@ func (p *Parser) parseCommandNode() (Node, error) {
 		t1 := p.peekNth(1)
 		t2 := p.peekNth(2)
 		if t1.Type == lexer.LPAREN && t2.Type == lexer.RPAREN {
-			return p.parseFuncDefShort()
+			node, err := p.parseFuncDefShort()
+			if err != nil || node == nil {
+				return node, err
+			}
+			return p.maybeWrapInPipeline(node)
 		}
 
 		switch t.Val {
 		case "if":
-			return p.parseIfCmd()
+			node, err := p.parseIfCmd()
+			if err != nil || node == nil {
+				return node, err
+			}
+			return p.maybeWrapInPipeline(node)
 		case "for":
-			return p.parseForCmd()
+			node, err := p.parseForCmd()
+			if err != nil || node == nil {
+				return node, err
+			}
+			return p.maybeWrapInPipeline(node)
 		case "while":
-			return p.parseWhileCmd(false)
+			node, err := p.parseWhileCmd(false)
+			if err != nil || node == nil {
+				return node, err
+			}
+			return p.maybeWrapInPipeline(node)
 		case "until":
-			return p.parseWhileCmd(true)
+			node, err := p.parseWhileCmd(true)
+			if err != nil || node == nil {
+				return node, err
+			}
+			return p.maybeWrapInPipeline(node)
 		case "case":
-			return p.parseCaseCmd()
+			node, err := p.parseCaseCmd()
+			if err != nil || node == nil {
+				return node, err
+			}
+			return p.maybeWrapInPipeline(node)
 		case "function":
-			return p.parseFuncDefKeyword()
+			node, err := p.parseFuncDefKeyword()
+			if err != nil || node == nil {
+				return node, err
+			}
+			return p.maybeWrapInPipeline(node)
 		}
 	}
 
-	// Fallthrough to pipeline; convert typed nil to untyped nil
+	// Fallthrough to pipeline (handles simple commands and their pipes)
 	pipe, err := p.parsePipeline()
 	if pipe == nil {
 		return nil, err
 	}
 	return pipe, err
+}
+
+// maybeWrapInPipeline wraps node in a Pipeline if the next token is |,
+// collecting all pipe stages. Used so compound commands can appear as
+// the left-hand side of a pipeline: (env;env;env) | less, { ls } | grep foo, etc.
+func (p *Parser) maybeWrapInPipeline(first Node) (Node, error) {
+	if p.peek().Type != lexer.PIPE {
+		return first, nil
+	}
+	pipe := &Pipeline{Cmds: []Node{first}}
+	for p.peek().Type == lexer.PIPE {
+		p.consumeNonNL()
+		p.skipNewlines()
+		next, err := p.parsePipelineSegment()
+		if err != nil {
+			return nil, err
+		}
+		if next == nil {
+			return nil, &ParseError{"expected command after '|'"}
+		}
+		pipe.Cmds = append(pipe.Cmds, next)
+	}
+	return pipe, nil
 }
 
 // ---- compound command parsers ----
@@ -673,21 +733,20 @@ func (p *Parser) parsePipeline() (*Pipeline, error) {
 		negate = true
 	}
 
-	cmd, err := p.parseSimpleCmd()
+	first, err := p.parsePipelineSegment()
 	if err != nil {
 		return nil, err
 	}
-	if cmd == nil {
+	if first == nil {
 		return nil, nil
 	}
 
-	pipe := &Pipeline{Cmds: []Node{cmd}, Negate: negate}
+	pipe := &Pipeline{Cmds: []Node{first}, Negate: negate}
 
 	for p.peek().Type == lexer.PIPE {
 		p.consumeNonNL()
 		p.skipNewlines()
-		// After | we may have a compound command
-		next, err := p.parseCommandNode()
+		next, err := p.parsePipelineSegment()
 		if err != nil {
 			return nil, err
 		}
@@ -698,6 +757,52 @@ func (p *Parser) parsePipeline() (*Pipeline, error) {
 	}
 
 	return pipe, nil
+}
+
+// parsePipelineSegment parses one segment of a pipeline — a compound command
+// (subshell, group, if, for, while, case) or a simple command. It does not
+// recurse into parsePipeline, avoiding infinite recursion.
+func (p *Parser) parsePipelineSegment() (Node, error) {
+	t := p.peek()
+	if p.isListEnd(t) {
+		return nil, nil
+	}
+	if t.Type == lexer.LBRACE {
+		return p.parseGroupCmd()
+	}
+	if t.Type == lexer.LPAREN {
+		return p.parseSubshell()
+	}
+	if t.Type == lexer.DLARITH {
+		tok := p.consume()
+		return &ArithCmd{Expr: tok.Val}, nil
+	}
+	if t.Type == lexer.WORD {
+		t1 := p.peekNth(1)
+		t2 := p.peekNth(2)
+		if t1.Type == lexer.LPAREN && t2.Type == lexer.RPAREN {
+			return p.parseFuncDefShort()
+		}
+		switch t.Val {
+		case "if":
+			return p.parseIfCmd()
+		case "for":
+			return p.parseForCmd()
+		case "while":
+			return p.parseWhileCmd(false)
+		case "until":
+			return p.parseWhileCmd(true)
+		case "case":
+			return p.parseCaseCmd()
+		case "function":
+			return p.parseFuncDefKeyword()
+		}
+	}
+	cmd, err := p.parseSimpleCmd()
+	if cmd == nil {
+		return nil, err
+	}
+	return cmd, err
 }
 
 func (p *Parser) parseSimpleCmd() (*SimpleCmd, error) {

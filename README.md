@@ -10,7 +10,23 @@ The binary name is derived from the executable stem — rename it and all prompt
 
 ## Installation
 
-### go install (recommended)
+### Download binary (easiest)
+
+Grab the latest pre-built binary from the [Releases](https://github.com/fermat-tech/posh/releases) page — no Go required.
+
+| File | Platform |
+|------|----------|
+| `posh.exe` | Windows (amd64) |
+| `posh-linux-amd64` | Linux (amd64) |
+
+Place it somewhere on your `PATH` and you're done. On Linux, mark it executable first:
+
+```sh
+chmod +x posh-linux-amd64
+mv posh-linux-amd64 ~/.local/bin/posh
+```
+
+### go install
 
 Requires [Go](https://golang.org) 1.21+.
 
@@ -18,19 +34,16 @@ Requires [Go](https://golang.org) 1.21+.
 go install github.com/fermat-tech/posh@latest
 ```
 
-The binary lands in `%USERPROFILE%\go\bin`, which should already be on your `PATH`.
+The binary lands in `%USERPROFILE%\go\bin` (Windows) or `~/go/bin` (Linux/macOS), which should already be on your `PATH`.
 
 ### Build from source
 
 ```powershell
 git clone https://github.com/fermat-tech/posh.git
 cd posh
-go build -o posh.exe .
+go build -o posh.exe .   # Windows
+go build -o posh .       # Linux / macOS
 ```
-
-### Download
-
-Grab the latest binary from [Releases](https://github.com/fermat-tech/posh/releases).
 
 ---
 
