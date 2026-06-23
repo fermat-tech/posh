@@ -299,6 +299,14 @@ func findWordStart(head string) (start int, openQuote rune) {
 	return wordStart, oq
 }
 
+// looksLikePath reports whether a word in command position should be completed
+// as a filename rather than a command name. Mirrors bash: a command word that
+// contains a slash (or begins with ~) is a pathname, so it gets file completion
+// instead of a PATH/builtin lookup.
+func looksLikePath(word string) bool {
+	return strings.ContainsAny(word, "/\\") || strings.HasPrefix(word, "~")
+}
+
 func (c *poshCompleter) Complete(line string, pos int) (string, []string, string) {
 	head := line[:pos]
 	tail := line[pos:]
@@ -323,7 +331,7 @@ func (c *poshCompleter) Complete(line string, pos int) (string, []string, string
 	switch {
 	case strings.HasPrefix(rawPrefix, "$") && !strings.ContainsAny(rawPrefix, "/\\"):
 		completions = c.varCandidates(rawPrefix)
-	case isFirstWord && openQuote == 0:
+	case isFirstWord && openQuote == 0 && !looksLikePath(rawPrefix):
 		completions = c.commandCandidates(rawPrefix)
 	default:
 		completions = c.fileCandidates(rawPrefix)
