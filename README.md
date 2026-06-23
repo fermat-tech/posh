@@ -207,4 +207,4 @@ Color in the prompt follows `NO_COLOR` (see [no-color.org](https://no-color.org)
 
 ## License
 
-MIT
+[MIT](https://opensource.org/licenses/MIT)
