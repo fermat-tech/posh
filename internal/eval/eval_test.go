@@ -116,9 +116,7 @@ func TestArithCommandStatus(t *testing.T) {
 }
 
 // chdirTemp returns a fresh temp dir and switches the process into it,
-// restoring the original cwd on cleanup. Redirect tests use bare relative
-// filenames because posh does not currently expand redirect targets (quoted or
-// variable paths are kept literally), so absolute Windows paths can't be used.
+// restoring the original cwd on cleanup.
 func chdirTemp(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
@@ -162,6 +160,20 @@ func TestStderrRedirect(t *testing.T) {
 	data, _ := os.ReadFile(filepath.Join(dir, "err.txt"))
 	if len(data) == 0 {
 		t.Fatalf("expected stderr to be captured to file")
+	}
+}
+
+func TestRedirectTargetExpansion(t *testing.T) {
+	dir := chdirTemp(t)
+	// Variable expansion in a redirect target.
+	eval(t, `F=via_var.txt; echo hi > $F`)
+	if data, err := os.ReadFile(filepath.Join(dir, "via_var.txt")); err != nil || strings.TrimSpace(string(data)) != "hi" {
+		t.Fatalf("variable redirect target: data=%q err=%v", data, err)
+	}
+	// Quoted redirect target — quotes must be removed, not kept literally.
+	eval(t, `echo hey > "quoted name.txt"`)
+	if data, err := os.ReadFile(filepath.Join(dir, "quoted name.txt")); err != nil || strings.TrimSpace(string(data)) != "hey" {
+		t.Fatalf("quoted redirect target: data=%q err=%v", data, err)
 	}
 }
 

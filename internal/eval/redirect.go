@@ -35,6 +35,19 @@ func applyRedirs(sh *Shell, redirs []parser.Redir, stdin io.Reader, stdout, stde
 	}
 
 	for _, r := range redirs {
+		// Expand the target of filename-based redirections — parameter, command,
+		// arithmetic, and tilde expansion plus quote removal — so `> "$dir/f"`,
+		// `> ~/f`, and quoted paths resolve. r is a loop copy, so mutating it is
+		// local to this iteration. Heredoc/here-string ops carry body content in
+		// r.File and are expanded separately below.
+		switch r.Op {
+		case lexer.REDIR_OUT, lexer.REDIR_APPEND, lexer.REDIR_IN,
+			lexer.REDIR_ERR, lexer.REDIR_ERR_APPEND, lexer.REDIR_BOTH,
+			lexer.REDIR_BOTH_APPEND, lexer.REDIR_FD_OUT, lexer.REDIR_FD_APPEND,
+			lexer.REDIR_FD_IN:
+			r.File = unprotectWord(sh.expandWord(r.File))
+		}
+
 		switch r.Op {
 		case lexer.REDIR_OUT:
 			f, err := os.Create(r.File)

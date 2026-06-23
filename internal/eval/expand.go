@@ -413,20 +413,24 @@ func (sh *Shell) expandCmdSub(runes []rune, i int) (string, int) {
 
 // expandArith evaluates $((expr)).
 func (sh *Shell) expandArith(runes []rune, i int) (string, int) {
-	// Find closing ))
+	// Find the closing )) that matches this $((. Track nested parens so an inner
+	// group like (2 + 3) doesn't swallow the terminator: a single ) closes an
+	// inner (, while )) at depth 0 ends the arithmetic expression.
 	j := i + 3 // skip $((
 	depth := 0
 	for j < len(runes)-1 {
-		if runes[j] == '(' {
+		switch runes[j] {
+		case '(':
 			depth++
-		} else if runes[j] == ')' && runes[j+1] == ')' {
-			if depth == 0 {
-				break
+		case ')':
+			if depth == 0 && runes[j+1] == ')' {
+				goto found
 			}
 			depth--
 		}
 		j++
 	}
+found:
 	if j >= len(runes)-1 {
 		return "$((", 3
 	}
@@ -589,11 +593,11 @@ func parseArithCmp(s string) (int64, error) {
 			op2 := s[i-1 : i+1]
 			switch op2 {
 			case "==", "!=", "<=", ">=":
-				left, err := parseArithAdd(strings.TrimSpace(s[:i-1]))
+				left, err := parseArithShift(strings.TrimSpace(s[:i-1]))
 				if err != nil {
 					return 0, err
 				}
-				right, err := parseArithAdd(strings.TrimSpace(s[i+1:]))
+				right, err := parseArithShift(strings.TrimSpace(s[i+1:]))
 				if err != nil {
 					return 0, err
 				}
@@ -621,13 +625,14 @@ func parseArithCmp(s string) (int64, error) {
 				}
 			}
 		}
-		// One-char < and > (not part of <= or >=)
-		if s[i] == '<' && i > 0 && (i+1 >= len(s) || s[i+1] != '=') {
-			left, err := parseArithAdd(strings.TrimSpace(s[:i]))
+		// One-char < and > (not part of <=, >=, or the shift operators << >>).
+		if s[i] == '<' && i > 0 && (i+1 >= len(s) || s[i+1] != '=') &&
+			s[i-1] != '<' && (i+1 >= len(s) || s[i+1] != '<') {
+			left, err := parseArithShift(strings.TrimSpace(s[:i]))
 			if err != nil {
 				return 0, err
 			}
-			right, err := parseArithAdd(strings.TrimSpace(s[i+1:]))
+			right, err := parseArithShift(strings.TrimSpace(s[i+1:]))
 			if err != nil {
 				return 0, err
 			}
@@ -636,12 +641,13 @@ func parseArithCmp(s string) (int64, error) {
 			}
 			return 0, nil
 		}
-		if s[i] == '>' && i > 0 && (i+1 >= len(s) || s[i+1] != '=') {
-			left, err := parseArithAdd(strings.TrimSpace(s[:i]))
+		if s[i] == '>' && i > 0 && (i+1 >= len(s) || s[i+1] != '=') &&
+			s[i-1] != '>' && (i+1 >= len(s) || s[i+1] != '>') {
+			left, err := parseArithShift(strings.TrimSpace(s[:i]))
 			if err != nil {
 				return 0, err
 			}
-			right, err := parseArithAdd(strings.TrimSpace(s[i+1:]))
+			right, err := parseArithShift(strings.TrimSpace(s[i+1:]))
 			if err != nil {
 				return 0, err
 			}
@@ -649,6 +655,36 @@ func parseArithCmp(s string) (int64, error) {
 				return 1, nil
 			}
 			return 0, nil
+		}
+	}
+	return parseArithShift(s)
+}
+
+// parseArithShift handles the bitwise shift operators << and >>, which bind
+// tighter than comparisons but looser than addition.
+func parseArithShift(s string) (int64, error) {
+	depth := 0
+	for i := len(s) - 1; i >= 1; i-- {
+		switch s[i] {
+		case ')':
+			depth++
+		case '(':
+			depth--
+		case '<', '>':
+			if depth == 0 && s[i-1] == s[i] {
+				left, err := parseArithShift(strings.TrimSpace(s[:i-1]))
+				if err != nil {
+					return 0, err
+				}
+				right, err := parseArithAdd(strings.TrimSpace(s[i+1:]))
+				if err != nil {
+					return 0, err
+				}
+				if s[i] == '<' {
+					return left << uint(right), nil
+				}
+				return left >> uint(right), nil
+			}
 		}
 	}
 	return parseArithAdd(s)

@@ -54,12 +54,16 @@ func TestCommandSubstitution(t *testing.T) {
 
 func TestArithmeticExpansion(t *testing.T) {
 	cases := map[string]string{
-		`echo $((2 + 3 * 4))`: "14",
-		`echo $((10 / 3))`:    "3",
-		`echo $((10 % 3))`:    "1",
-		`echo $((2 > 1))`:     "1",
-		`echo $((1 == 2))`:    "0",
-		`echo $((7 - 9))`:     "-2",
+		`echo $((2 + 3 * 4))`:   "14",
+		`echo $(((2 + 3) * 4))`: "20",
+		`echo $((10 / 3))`:      "3",
+		`echo $((10 % 3))`:      "1",
+		`echo $((2 > 1))`:       "1",
+		`echo $((1 == 2))`:      "0",
+		`echo $((7 - 9))`:       "-2",
+		`echo $((1 << 4))`:      "16",
+		`echo $((256 >> 2))`:    "64",
+		`echo $((1 << 3 == 8))`: "1",
 	}
 	for src, want := range cases {
 		if got := eval(t, src); got != want {
