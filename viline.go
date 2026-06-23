@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 )
 
 // ---- types shared with platform file ----
@@ -603,6 +605,38 @@ func (vs *viState) wordBackPos() int {
 }
 
 func isViSpace(r rune) bool { return r == ' ' || r == '\t' }
+
+// readUTF8Rune reads the continuation bytes of a multi-byte UTF-8 sequence
+// whose leading byte is already in `first` and returns the decoded rune.
+// Used by platform readKey implementations; stdin must be in raw mode.
+func readUTF8Rune(first byte) (rune, error) {
+	var total int
+	switch {
+	case first&0xE0 == 0xC0:
+		total = 2
+	case first&0xF0 == 0xE0:
+		total = 3
+	case first&0xF8 == 0xF0:
+		total = 4
+	default:
+		return unicode.ReplacementChar, nil
+	}
+	buf := make([]byte, total)
+	buf[0] = first
+	for i := 1; i < total; i++ {
+		var b [1]byte
+		_, err := os.Stdin.Read(b[:])
+		if err != nil {
+			return 0, err
+		}
+		buf[i] = b[0]
+	}
+	r, _ := utf8.DecodeRune(buf)
+	if r == utf8.RuneError {
+		return unicode.ReplacementChar, nil
+	}
+	return r, nil
+}
 
 // ---- display ----
 

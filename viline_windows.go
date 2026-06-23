@@ -5,8 +5,6 @@ package main
 import (
 	"os"
 	"syscall"
-	"unicode"
-	"unicode/utf8"
 	"unsafe"
 )
 
@@ -141,7 +139,11 @@ func readKey() (keyEvent, error) {
 			return readEscapeSequence()
 		default:
 			if c >= 0x80 {
-				return readUTF8Continuation(c)
+				r, err := readUTF8Rune(c)
+				if err != nil {
+					return keyEvent{typ: keyEOF}, err
+				}
+				return keyEvent{typ: keyRune, r: r}, nil
 			}
 			if c >= 0x20 {
 				return keyEvent{typ: keyRune, r: rune(c)}, nil
@@ -149,40 +151,6 @@ func readKey() (keyEvent, error) {
 			// Skip other unhandled control bytes.
 		}
 	}
-}
-
-// readUTF8Continuation reads the continuation bytes of a multi-byte UTF-8
-// sequence whose leading byte is already in `first`, decoding the full rune.
-// Handles 2-, 3-, and 4-byte sequences (covers all Unicode including emoji).
-func readUTF8Continuation(first byte) (keyEvent, error) {
-	var total int
-	switch {
-	case first&0xE0 == 0xC0:
-		total = 2
-	case first&0xF0 == 0xE0:
-		total = 3
-	case first&0xF8 == 0xF0:
-		total = 4
-	default:
-		return keyEvent{typ: keyRune, r: unicode.ReplacementChar}, nil
-	}
-
-	buf := make([]byte, total)
-	buf[0] = first
-	for i := 1; i < total; i++ {
-		var b [1]byte
-		_, err := os.Stdin.Read(b[:])
-		if err != nil {
-			return keyEvent{typ: keyEOF}, err
-		}
-		buf[i] = b[0]
-	}
-
-	r, _ := utf8.DecodeRune(buf)
-	if r == utf8.RuneError {
-		return keyEvent{typ: keyRune, r: unicode.ReplacementChar}, nil
-	}
-	return keyEvent{typ: keyRune, r: r}, nil
 }
 
 // readEscapeSequence reads and classifies a VT escape sequence after the
