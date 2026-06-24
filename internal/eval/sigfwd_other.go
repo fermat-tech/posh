@@ -10,6 +10,13 @@ import (
 
 func setForegroundAttrs(_ *exec.Cmd) {}
 
+// setBackgroundAttrs puts a background job in its own process group so a
+// terminal-generated SIGINT (Ctrl+C) aimed at the foreground command is not
+// delivered to it.
+func setBackgroundAttrs(c *exec.Cmd) {
+	c.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+}
+
 func sendInterrupt(pid int) {
 	syscall.Kill(pid, syscall.SIGINT)
 }

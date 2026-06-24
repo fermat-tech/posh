@@ -714,6 +714,9 @@ func (sh *Shell) evalSimpleCmd(cmd *parser.SimpleCmd, stdin io.Reader, stdout, s
 		// soon as the tracked process exits.
 		c.Stdout = os.Stdout
 		c.Stderr = os.Stderr
+		// Own process group: a Ctrl+C meant for the foreground command must not
+		// reach background jobs (matches bash job-control behavior).
+		setBackgroundAttrs(c)
 		if err := c.Start(); err != nil {
 			fmt.Fprintf(rStderr, "%s: %v\n", sh.name, err)
 			return 1

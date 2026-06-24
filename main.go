@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -39,6 +40,23 @@ func main() {
 				os.Exit(code)
 			}
 			panic(r)
+		}
+	}()
+
+	// Keep the shell alive across Ctrl+C for the whole session. A foreground
+	// external command forwards the interrupt to its own process group (see
+	// eval.evalSimpleCmd), but the shell itself must never take the default
+	// terminate action. Registering a persistent handler keeps os.Interrupt
+	// "wanted" so the Windows console control handler always reports the event
+	// as handled — even at the prompt, between command runs, or when a
+	// background job also receives the console's CTRL_C_EVENT. The goroutine
+	// just drains the channel; the line editors handle Ctrl+C as a line-abort
+	// while reading input. Foreground commands additionally Notify their own
+	// channel, so this does not interfere with interrupt forwarding.
+	sessionSig := make(chan os.Signal, 1)
+	signal.Notify(sessionSig, os.Interrupt)
+	go func() {
+		for range sessionSig {
 		}
 	}()
 

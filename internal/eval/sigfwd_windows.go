@@ -23,6 +23,16 @@ func setForegroundAttrs(c *exec.Cmd) {
 	}
 }
 
+// setBackgroundAttrs starts a background job in its own process group so the
+// console's CTRL_C_EVENT is not delivered to it. Without this, pressing Ctrl+C
+// to interrupt a foreground command would also kill background jobs that share
+// the shell's process group.
+func setBackgroundAttrs(c *exec.Cmd) {
+	c.SysProcAttr = &syscall.SysProcAttr{
+		CreationFlags: syscall.CREATE_NEW_PROCESS_GROUP,
+	}
+}
+
 // sendInterrupt sends CTRL_BREAK_EVENT to the child's process group.
 // CTRL_C_EVENT cannot be targeted at a specific process group on Windows;
 // CTRL_BREAK_EVENT can, and causes the same default action (termination).
