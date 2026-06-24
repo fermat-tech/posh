@@ -221,6 +221,7 @@ func (vs *viState) doComplete() {
 		return
 	}
 	line := string(vs.buf)
+	origPos := vs.pos // cursor position before completion mutates vs.pos/vs.buf
 	head, completions, _ := vs.completer(line, vs.pos)
 	if len(completions) == 0 {
 		return
@@ -245,11 +246,23 @@ func (vs *viState) doComplete() {
 	common := viCommonPrefix(completions)
 	newLine := head + common
 	showList := string(vs.buf) == vs.lastTabBuf // second Tab with no change → list
+
+	// The fragment originally typed for this word: the runes of the original
+	// line between the end of head and the original cursor. Compute it before
+	// overwriting vs.pos/vs.buf, and bound it defensively — completions usually
+	// extend the word, so the new cursor would otherwise index past the old line.
+	lineRunes := []rune(line)
+	headLen := len([]rune(head))
+	typed := ""
+	if headLen <= origPos && origPos <= len(lineRunes) {
+		typed = string(lineRunes[headLen:origPos])
+	}
+
 	vs.buf = []rune(newLine)
 	vs.pos = len(vs.buf)
 	vs.lastTabBuf = string(vs.buf)
 
-	if showList || common == string([]rune(line)[len([]rune(head)):vs.pos]) {
+	if showList || common == typed {
 		fmt.Fprintf(os.Stdout, "\r\n")
 		for _, c := range completions {
 			fmt.Fprintf(os.Stdout, "%s\r\n", c)
