@@ -182,6 +182,11 @@ func TestNeedsContinuation(t *testing.T) {
 		"for x in a; do echo $x; done",
 		"cat << EOF\nbody\nEOF",
 		"(a; b)",
+		// Keywords used as ordinary words must NOT be treated as open blocks.
+		"echo this is a multiline string for testing",
+		"echo for testing",
+		"echo if while until case done fi esac",
+		"echo this is a \\\nmultiline string \\\nfor testing",
 	}
 	for _, s := range done {
 		if NeedsContinuation(s) {

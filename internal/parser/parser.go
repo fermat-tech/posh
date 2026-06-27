@@ -1079,7 +1079,7 @@ func heredocPending(input string) bool {
 // NeedsContinuation reports whether the input string looks incomplete.
 // Used by the REPL to decide whether to prompt for more input.
 func NeedsContinuation(input string) bool {
-	// Trailing operators
+	// A line ending in a continuation operator always needs more input.
 	trimmed := strings.TrimRight(input, " \t\r\n")
 	if strings.HasSuffix(trimmed, "|") ||
 		strings.HasSuffix(trimmed, "&&") ||
@@ -1088,46 +1088,27 @@ func NeedsContinuation(input string) bool {
 		return true
 	}
 
-	// Count keyword nesting using the lexer
+	// An unterminated quote is a lexer error; let the evaluator report it rather
+	// than prompting forever for more input.
 	l := lexer.New(input)
-	toks := l.Tokenize()
+	l.Tokenize()
 	if len(l.Errors) > 0 {
-		return false // let the caller evaluate the chunk so the error gets reported
+		return false
 	}
-	depth := 0
-	for _, t := range toks {
-		if t.Type != lexer.WORD {
-			continue
-		}
-		switch t.Val {
-		case "if", "for", "while", "until", "case":
-			depth++
-		case "fi", "done", "esac":
-			depth--
-		}
-	}
-	if depth > 0 {
+
+	// A heredoc whose terminating delimiter line has not been typed yet. The
+	// parser doesn't collect heredoc bodies, so detect this separately.
+	if heredocPending(input) {
 		return true
 	}
 
-	// Unmatched { or (
-	braceDepth := 0
-	parenDepth := 0
-	for _, t := range toks {
-		switch t.Type {
-		case lexer.LBRACE:
-			braceDepth++
-		case lexer.RBRACE:
-			braceDepth--
-		case lexer.LPAREN:
-			parenDepth++
-		case lexer.RPAREN:
-			parenDepth--
-		}
-	}
-	if braceDepth > 0 || parenDepth > 0 {
+	// Defer to the parser to distinguish a genuinely unterminated compound
+	// command (if/for/while/until/case, ( ), { }) from a keyword used as an
+	// ordinary word — e.g. `echo for testing` is complete, not an open loop.
+	// Only an "incomplete" result means more input is coming; a real syntax
+	// error should fall through and be evaluated so the error surfaces.
+	if _, err := ParseAt(input, 1); errors.Is(err, ErrIncomplete) {
 		return true
 	}
-
-	return heredocPending(input)
+	return false
 }
