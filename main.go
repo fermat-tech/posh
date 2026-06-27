@@ -208,27 +208,12 @@ func linerReadMultiLine(rl *liner.State, sh *eval.Shell) (string, error) {
 	}
 }
 
-// viReadMultiLine reads one complete command using the vi-mode editor.
+// viReadMultiLine reads one complete command using the vi-mode editor. The
+// editor manages the whole (possibly multi-line) command as a single buffer:
+// when Enter is pressed while the command is incomplete, it inserts a newline
+// and keeps editing, so vi motions work across the entire command.
 func viReadMultiLine(sh *eval.Shell, completer completeFn) (string, error) {
-	var lines []string
-	for {
-		prompt := buildPrompt(sh)
-		if len(lines) > 0 {
-			prompt = "> "
-		}
-		line, err := viReadLine(prompt, sh.History, completer)
-		if err != nil {
-			if len(lines) == 0 {
-				return "", err
-			}
-			return strings.Join(lines, "\n"), err
-		}
-		lines = append(lines, line)
-		full := strings.Join(lines, "\n")
-		if !parser.NeedsContinuation(full) {
-			return full, nil
-		}
-	}
+	return viReadLine(buildPrompt(sh), "> ", sh.History, completer, parser.NeedsContinuation)
 }
 
 func runNonInteractive(sh *eval.Shell) {

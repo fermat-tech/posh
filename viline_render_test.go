@@ -5,81 +5,93 @@ import (
 	"testing"
 )
 
-// TestRenderLineSingleRow: a short line fits on one row, so no vertical movement
-// is emitted and the prompt+buffer appear verbatim.
-func TestRenderLineSingleRow(t *testing.T) {
-	out, maxRows, cursorDW := renderLine("$ ", []rune("echo hi"), 7, 80, 0, 0)
-	if maxRows != 1 {
-		t.Fatalf("maxRows = %d, want 1", maxRows)
+// TestLayoutSingleRow: a short line stays on row 0; the cursor column tracks the
+// prompt width plus the text before it.
+func TestLayoutSingleRow(t *testing.T) {
+	pos, endRow := vlLayout("$ ", "> ", []rune("echo hi"), 80)
+	if endRow != 0 {
+		t.Fatalf("endRow = %d, want 0", endRow)
 	}
-	if cursorDW != 7 {
-		t.Fatalf("cursorDW = %d, want 7", cursorDW)
-	}
-	if !strings.Contains(out, "$ echo hi") {
-		t.Fatalf("output missing prompt+buffer: %q", out)
-	}
-	// No up/down row movement for a single-row line.
-	if strings.Contains(out, "\x1b[1A") || strings.Contains(out, "\x1b[1B") {
-		t.Fatalf("unexpected vertical cursor movement: %q", out)
+	// cursor at end: prompt(2) + "echo hi"(7) = col 9 on row 0.
+	if got := pos[7]; got.row != 0 || got.col != 9 {
+		t.Fatalf("end position = %+v, want {0,9}", got)
 	}
 }
 
-// TestRenderLineWrapsToMultipleRows: a line longer than the terminal width must
-// report the correct number of rows so the next refresh can clear them all.
-func TestRenderLineWrapsToMultipleRows(t *testing.T) {
+// TestLayoutSoftWrap: a line wider than the terminal wraps to a second row.
+func TestLayoutSoftWrap(t *testing.T) {
 	cols := 10
-	// prompt width 2 + 20 content = 22 cols -> ceil(22/10) = 3 rows.
-	buf := []rune(strings.Repeat("x", 20))
-	_, maxRows, _ := renderLine("$ ", buf, len(buf), cols, 0, 0)
-	if maxRows != 3 {
-		t.Fatalf("maxRows for wrapped line = %d, want 3", maxRows)
+	buf := []rune(strings.Repeat("x", 20)) // 20 cols + prompt 2 = spans 3 rows
+	pos, endRow := vlLayout("$ ", "> ", buf, cols)
+	if endRow != 2 {
+		t.Fatalf("endRow = %d, want 2", endRow)
+	}
+	// First char is on row 0 col 2 (after the prompt).
+	if got := pos[0]; got.row != 0 || got.col != 2 {
+		t.Fatalf("pos[0] = %+v, want {0,2}", got)
 	}
 }
 
-// TestRenderLineClearsPreviousRows: when the previous render occupied several
-// rows, the refresh moves down to the bottom and clears every row.
-func TestRenderLineClearsPreviousRows(t *testing.T) {
+// TestLayoutEmbeddedNewline: an embedded newline starts a new row whose column
+// begins after the PS2 prompt, regardless of wrapping.
+func TestLayoutEmbeddedNewline(t *testing.T) {
+	buf := []rune("ab\ncd")
+	pos, endRow := vlLayout("$ ", "> ", buf, 80)
+	if endRow != 1 {
+		t.Fatalf("endRow = %d, want 1 (two logical lines)", endRow)
+	}
+	// 'c' is index 3 (after a,b,\n); it sits on row 1 at col 2 (after "> ").
+	if got := pos[3]; got.row != 1 || got.col != 2 {
+		t.Fatalf("pos of 'c' = %+v, want {1,2}", got)
+	}
+	// End (after "cd") is row 1, col 4.
+	if got := pos[len(buf)]; got.row != 1 || got.col != 4 {
+		t.Fatalf("end = %+v, want {1,4}", got)
+	}
+}
+
+// TestLayoutWideChars: wide runes occupy two columns when computing wraps.
+func TestLayoutWideChars(t *testing.T) {
 	cols := 10
-	// Previous render: 3 rows, cursor was on row 1 (prevCursorDW = 0).
-	// New buffer is short (1 row). Expect: move down 2 rows, then clear rows.
-	out, maxRows, _ := renderLine("$ ", []rune("hi"), 2, cols, 3, 0)
-	if !strings.Contains(out, "\x1b[2B") {
-		t.Fatalf("expected move-down-2 to reach last old row: %q", out)
-	}
-	// Two "clear row and go up" sequences for rows above the bottom.
-	if got := strings.Count(out, "\r\x1b[0K\x1b[1A"); got != 2 {
-		t.Fatalf("clear-and-up count = %d, want 2: %q", got, out)
-	}
-	// maxRows is sticky at the high-water mark.
-	if maxRows != 3 {
-		t.Fatalf("maxRows = %d, want 3 (high-water mark retained)", maxRows)
-	}
-}
-
-// TestRenderLineCursorColumnMidBuffer: with the cursor in the middle of a
-// single-row line, the column is set with CHA-relative movement.
-func TestRenderLineCursorColumnMidBuffer(t *testing.T) {
-	// prompt "$ " (2) + cursor after "echo" (4) => column 6.
-	out, _, cursorDW := renderLine("$ ", []rune("echo hi"), 4, 80, 0, 0)
-	if cursorDW != 4 {
-		t.Fatalf("cursorDW = %d, want 4", cursorDW)
-	}
-	if !strings.Contains(out, "\r\x1b[6C") {
-		t.Fatalf("expected cursor moved to column 6: %q", out)
-	}
-}
-
-// TestRenderLineWideChars: wide (2-column) runes count as two display columns
-// when computing wrap rows.
-func TestRenderLineWideChars(t *testing.T) {
-	cols := 10
-	// 6 wide CJK chars = 12 display cols, + prompt 2 = 14 -> 2 rows.
+	// prompt 2 + 6 wide chars (12 cols) = 14 -> spans 2 rows.
 	buf := []rune("漢字漢字漢字")
-	_, maxRows, cursorDW := renderLine("$ ", buf, len(buf), cols, 0, 0)
-	if maxRows != 2 {
-		t.Fatalf("maxRows for wide chars = %d, want 2", maxRows)
+	_, endRow := vlLayout("$ ", "> ", buf, cols)
+	if endRow != 1 {
+		t.Fatalf("endRow for wide chars = %d, want 1", endRow)
 	}
-	if cursorDW != 12 {
-		t.Fatalf("cursorDW for 6 wide chars = %d, want 12", cursorDW)
+}
+
+// TestRenderMultilineMovesToTopAndClears: a refresh after a multi-row render
+// moves the cursor up to the block top and clears downward before repainting.
+func TestRenderMultilineMovesToTopAndClears(t *testing.T) {
+	// Previous render left the cursor on row 2 of the block.
+	out, cursorRow := renderMultiline("$ ", "> ", []rune("a\nb\nc"), 5, 80, 2)
+	if !strings.Contains(out, "\x1b[2A") {
+		t.Fatalf("expected move-up-2 to block top: %q", out)
+	}
+	if !strings.Contains(out, "\x1b[J") {
+		t.Fatalf("expected clear-to-end-of-display: %q", out)
+	}
+	// Cursor ends on the last (3rd) logical line, row index 2.
+	if cursorRow != 2 {
+		t.Fatalf("cursorRow = %d, want 2", cursorRow)
+	}
+	// PS2 should prefix each continuation line in the output.
+	if strings.Count(out, "> ") != 2 {
+		t.Fatalf("expected 2 PS2 prefixes, got %d: %q", strings.Count(out, "> "), out)
+	}
+}
+
+// TestRenderMultilineCursorOnFirstRow: with the cursor in the first line of a
+// multi-line buffer, the refresh moves back up to that row.
+func TestRenderMultilineCursorOnFirstRow(t *testing.T) {
+	// buffer "ab\ncd", cursor at index 1 (within first line).
+	out, cursorRow := renderMultiline("$ ", "> ", []rune("ab\ncd"), 1, 80, 0)
+	if cursorRow != 0 {
+		t.Fatalf("cursorRow = %d, want 0", cursorRow)
+	}
+	// End is on row 1, so to put the cursor on row 0 it must move up once.
+	if !strings.Contains(out, "\x1b[1A") {
+		t.Fatalf("expected move-up-1 to reach first row: %q", out)
 	}
 }
