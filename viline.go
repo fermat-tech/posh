@@ -77,22 +77,27 @@ type undoEntry struct {
 }
 
 type viState struct {
-	buf            []rune
-	pos            int
-	mode           viModeT
-	history        []string
-	histIdx        int
-	saved          []rune
-	yank           []rune
-	undoStack      []undoEntry
-	prompt         string
-	lastDisplayLen int // visible columns written in previous redraw (for erase-to-end)
-	lastFChar      rune
-	lastFForward   bool // true = f (forward), false = F (backward)
-	lastFSet       bool
-	completer      completeFn
-	lastTabBuf     string // line at the last Tab press (for double-Tab detection)
-	originCol      int    // cursor column where the prompt was first drawn
+	buf          []rune
+	pos          int
+	mode         viModeT
+	history      []string
+	histIdx      int
+	saved        []rune
+	yank         []rune
+	undoStack    []undoEntry
+	prompt       string
+	lastFChar    rune
+	lastFForward bool // true = f (forward), false = F (backward)
+	lastFSet     bool
+	completer    completeFn
+	lastTabBuf   string // line at the last Tab press (for double-Tab detection)
+
+	// Multi-row redraw state (linenoise-style refresh). The editor renders the
+	// prompt + buffer as a block that may span several terminal rows when the
+	// input wraps; these track the previous render so the next one can clear and
+	// reposition correctly across rows.
+	maxRows      int // most rows the rendered block has occupied so far
+	prevCursorDW int // cursor's display column (incl. prompt) at the last redraw
 }
 
 // viReadLine reads one line using the vi-mode editor.
@@ -114,14 +119,13 @@ func viReadLine(prompt string, history []string, completer completeFn) (string, 
 		histIdx:   len(history),
 		mode:      viInsert,
 		completer: completer,
-		originCol: cursorColumn(),
 	}
 	vs.redraw()
 
 	for {
 		key, err := readKey()
 		if err != nil {
-			vs.crlf()
+			vs.endLine()
 			return string(vs.buf), err
 		}
 
@@ -135,10 +139,19 @@ func viReadLine(prompt string, history []string, completer completeFn) (string, 
 			done, line, rerr = vs.handleNormal(key)
 		}
 		if done {
-			vs.crlf()
+			vs.endLine()
 			return line, rerr
 		}
 	}
+}
+
+// endLine moves the cursor to the end of the rendered block and emits a newline,
+// so submitting a multi-row line leaves the terminal on a fresh row below the
+// whole input rather than wherever the cursor happened to be mid-buffer.
+func (vs *viState) endLine() {
+	vs.pos = len(vs.buf)
+	vs.redraw()
+	vs.crlf()
 }
 
 // ---- insert mode ----
@@ -267,9 +280,19 @@ func (vs *viState) doComplete() {
 		for _, c := range completions {
 			fmt.Fprintf(os.Stdout, "%s\r\n", c)
 		}
-		vs.lastDisplayLen = 0
+		// The previous rendered block has scrolled away above the list; start
+		// the next redraw from a clean slate on the current row.
+		vs.resetRenderState()
 	}
 	vs.redraw()
+}
+
+// resetRenderState clears the multi-row redraw bookkeeping. Call it after
+// emitting output (e.g. a completion list) that leaves the cursor on a fresh row
+// with no live rendered block above it.
+func (vs *viState) resetRenderState() {
+	vs.maxRows = 0
+	vs.prevCursorDW = 0
 }
 
 func viCommonPrefix(strs []string) string {
@@ -686,3 +709,79 @@ func bufDisplayWidth(buf []rune) int {
 }
 
 func (vs *viState) crlf() { fmt.Fprint(os.Stdout, "\r\n") }
+
+// redraw repaints the prompt and buffer, correctly handling input that wraps
+// across several terminal rows, then writes the result to the terminal.
+func (vs *viState) redraw() {
+	cols := terminalCols()
+	if cols < 1 {
+		cols = 80
+	}
+	out, maxRows, cursorDW := renderLine(vs.prompt, vs.buf, vs.pos, cols, vs.maxRows, vs.prevCursorDW)
+	vs.maxRows = maxRows
+	vs.prevCursorDW = cursorDW
+	fmt.Fprint(os.Stdout, out)
+}
+
+// renderLine produces the terminal output that repaints prompt+buf with the
+// cursor at pos, given the terminal width and the previous render's row count
+// and cursor display-column. It is the linenoise multi-line refresh algorithm:
+// relative cursor movement (scroll-safe) clears the previous render from the
+// bottom row upward, rewrites prompt+buffer, then moves the cursor to its target
+// row and column. All positioning uses display widths so wide characters
+// (CJK, emoji) line up. It returns the output string plus the updated maxRows
+// and cursor display-column to store for the next call. Pure (no I/O) so the
+// row arithmetic can be tested directly.
+func renderLine(prompt string, buf []rune, pos, cols, oldMaxRows, prevCursorDW int) (out string, maxRows, cursorDW int) {
+	plen := visibleLen(prompt)
+	contentW := bufDisplayWidth(buf)
+	posW := bufDisplayWidth(buf[:pos])
+
+	rows := (plen + contentW + cols - 1) / cols
+	if rows < 1 {
+		rows = 1
+	}
+	prevCursorRow := (plen + prevCursorDW + cols) / cols // 1-based row of cursor last time
+
+	var sb strings.Builder
+
+	// 1. Move down to the last row of the previous render.
+	if d := oldMaxRows - prevCursorRow; d > 0 {
+		fmt.Fprintf(&sb, "\x1b[%dB", d)
+	}
+	// 2. Clear each previous row from the bottom up to (but not including) the top.
+	for i := 0; i < oldMaxRows-1; i++ {
+		sb.WriteString("\r\x1b[0K\x1b[1A")
+	}
+	// 3. Clear the top row.
+	sb.WriteString("\r\x1b[0K")
+
+	// 4. Rewrite prompt and buffer.
+	sb.WriteString(prompt)
+	sb.WriteString(string(buf))
+
+	// 5. If the cursor is at end-of-buffer and exactly fills the last row, emit a
+	//    newline so the cursor rests on a fresh row instead of hanging off the
+	//    right edge (terminals defer the wrap until the next character).
+	if pos == len(buf) && (plen+contentW) > 0 && (plen+contentW)%cols == 0 {
+		sb.WriteString("\r\n")
+		rows++
+	}
+	maxRows = oldMaxRows
+	if rows > maxRows {
+		maxRows = rows
+	}
+
+	// 6. Move the cursor up to its target row, then set its column.
+	cursorRow := (plen + posW + cols) / cols // 1-based row of cursor now
+	if up := rows - cursorRow; up > 0 {
+		fmt.Fprintf(&sb, "\x1b[%dA", up)
+	}
+	if col := (plen + posW) % cols; col > 0 {
+		fmt.Fprintf(&sb, "\r\x1b[%dC", col)
+	} else {
+		sb.WriteString("\r")
+	}
+
+	return sb.String(), maxRows, posW
+}

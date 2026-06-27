@@ -3,7 +3,6 @@
 package main
 
 import (
-	"fmt"
 	"os"
 
 	"golang.org/x/sys/unix"
@@ -33,59 +32,14 @@ func consoleRawMode() (restore func(), err error) {
 	}, nil
 }
 
-// cursorColumn queries the terminal for the current cursor column (0-based).
-// Uses the ANSI DSR escape: ESC[6n → terminal replies ESC[row;colR.
-func cursorColumn() int {
-	fmt.Fprint(os.Stdout, "\033[6n")
-	var buf [32]byte
-	n := 0
-	// Read until 'R'
-	b := make([]byte, 1)
-	for n < len(buf) {
-		nr, err := os.Stdin.Read(b)
-		if err != nil || nr == 0 {
-			break
-		}
-		buf[n] = b[0]
-		n++
-		if b[0] == 'R' {
-			break
-		}
+// terminalCols returns the terminal width in columns, falling back to 80 when
+// it cannot be determined (e.g. output is not a tty).
+func terminalCols() int {
+	ws, err := unix.IoctlGetWinsize(int(os.Stdout.Fd()), unix.TIOCGWINSZ)
+	if err != nil || ws.Col == 0 {
+		return 80
 	}
-	// Parse ESC [ row ; col R
-	col := 0
-	inSeq := false
-	sawSemi := false
-	for i := 0; i < n; i++ {
-		c := buf[i]
-		if c == '[' {
-			inSeq = true
-			continue
-		}
-		if !inSeq {
-			continue
-		}
-		if c == ';' {
-			sawSemi = true
-			col = 0
-			continue
-		}
-		if c == 'R' {
-			break
-		}
-		if c >= '0' && c <= '9' && sawSemi {
-			col = col*10 + int(c-'0')
-		}
-	}
-	if col > 0 {
-		return col - 1 // convert from 1-based to 0-based
-	}
-	return 0
-}
-
-// setCursorX moves the cursor to column x (0-based) on the current row.
-func setCursorX(x int) {
-	fmt.Fprintf(os.Stdout, "\033[%dG", x+1) // ANSI CHA is 1-based
+	return int(ws.Col)
 }
 
 // readKey reads one logical key event from stdin.

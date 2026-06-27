@@ -13,7 +13,6 @@ var (
 	procGetConsoleMode             = kernel32.NewProc("GetConsoleMode")
 	procSetConsoleMode             = kernel32.NewProc("SetConsoleMode")
 	procGetConsoleScreenBufferInfo = kernel32.NewProc("GetConsoleScreenBufferInfo")
-	procSetConsoleCursorPosition   = kernel32.NewProc("SetConsoleCursorPosition")
 	procGetStdHandle               = kernel32.NewProc("GetStdHandle")
 	procSetConsoleCP               = kernel32.NewProc("SetConsoleCP")
 	procGetConsoleCP               = kernel32.NewProc("GetConsoleCP")
@@ -37,20 +36,20 @@ func stdoutHandle() syscall.Handle {
 	return syscall.Handle(h)
 }
 
-// cursorColumn returns the current cursor X position (0-based).
-func cursorColumn() int {
+// terminalCols returns the console width in columns (visible window width),
+// falling back to 80 when it cannot be determined.
+func terminalCols() int {
 	var info viConsoleScreenBufferInfo
-	procGetConsoleScreenBufferInfo.Call(uintptr(stdoutHandle()), uintptr(unsafe.Pointer(&info)))
-	return int(info.cursorPos.x)
-}
-
-// setCursorX moves the cursor to column x on the current row (0-based).
-func setCursorX(x int) {
-	var info viConsoleScreenBufferInfo
-	h := stdoutHandle()
-	procGetConsoleScreenBufferInfo.Call(uintptr(h), uintptr(unsafe.Pointer(&info)))
-	pos := uint32(uint16(x)) | uint32(uint16(info.cursorPos.y))<<16
-	procSetConsoleCursorPosition.Call(uintptr(h), uintptr(pos))
+	r, _, _ := procGetConsoleScreenBufferInfo.Call(uintptr(stdoutHandle()), uintptr(unsafe.Pointer(&info)))
+	if r == 0 {
+		return 80
+	}
+	// window is a SMALL_RECT: [Left, Top, Right, Bottom].
+	w := int(info.window[2]) - int(info.window[0]) + 1
+	if w <= 0 {
+		return 80
+	}
+	return w
 }
 
 const (
@@ -60,15 +59,24 @@ const (
 	enableInsertMode     = 0x0020
 	enableExtendedFlags  = 0x0080
 	enableVTInput        = 0x0200 // deliver keyboard events as UTF-8 VT sequences
+	enableVTOutput       = 0x0004 // ENABLE_VIRTUAL_TERMINAL_PROCESSING (interpret ANSI on output)
 )
 
-// initUTF8 switches the console to UTF-8 code pages (65001) at startup so
-// that all shell output — not just the line-editing phase — is rendered
-// correctly. Called once from init(); the original values are never restored
-// because the shell should operate in UTF-8 throughout its lifetime.
+// init switches the console to UTF-8 code pages (65001) and enables ANSI/VT
+// processing on stdout at startup. The UTF-8 code pages make all shell output —
+// not just the line-editing phase — render correctly; VT output processing lets
+// the multi-row line editor's ANSI escape sequences be interpreted rather than
+// printed literally. Called once; the original values are never restored because
+// the shell operates this way for its whole lifetime.
 func init() {
 	procSetConsoleCP.Call(65001)
 	procSetConsoleOutputCP.Call(65001)
+
+	h := stdoutHandle()
+	var mode uint32
+	if r, _, _ := procGetConsoleMode.Call(uintptr(h), uintptr(unsafe.Pointer(&mode))); r != 0 {
+		procSetConsoleMode.Call(uintptr(h), uintptr(mode|enableVTOutput))
+	}
 }
 
 // consoleRawMode puts the Windows console into raw mode (no echo, no line
