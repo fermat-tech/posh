@@ -57,7 +57,7 @@ posh -c "command"      Run a single command and exit
 
 ---
 
-## Features (Phase 1)
+## Features
 
 ### Pipelines
 ```sh
