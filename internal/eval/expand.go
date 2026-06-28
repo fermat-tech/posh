@@ -146,6 +146,36 @@ func (sh *Shell) wordSplit(s string) []string {
 	return parts
 }
 
+// hasBareDoubleQuote reports whether s contains a double quote that is not inside
+// a $(...) command substitution or ${...} expansion. Such a "bare" quote means
+// the lexer concatenated adjacent double-quoted groups (e.g. "a""b"); quotes
+// within a substitution are part of it and don't count.
+func hasBareDoubleQuote(s string) bool {
+	runes := []rune(s)
+	depth := 0 // nesting depth inside $( / ${ regions
+	for i := 0; i < len(runes); i++ {
+		c := runes[i]
+		if c == '$' && i+1 < len(runes) && (runes[i+1] == '(' || runes[i+1] == '{') {
+			depth++
+			i++ // consume the ( or {
+			continue
+		}
+		if depth > 0 {
+			switch c {
+			case '(', '{':
+				depth++
+			case ')', '}':
+				depth--
+			}
+			continue
+		}
+		if c == '"' {
+			return true
+		}
+	}
+	return false
+}
+
 // expandWord performs tilde, variable, command-substitution, arithmetic expansion
 // and quote stripping on a single word token.
 func (sh *Shell) expandWord(w string) string {
@@ -159,11 +189,13 @@ func (sh *Shell) expandWord(w string) string {
 	}
 
 	// Handle double-quoted string (stored with leading/trailing " sentinels by lexer).
-	// Only treat as a pure double-quoted string if the inner content has no raw "
-	// (which would indicate adjacent quoted groups like "a""b" concatenated by the lexer).
+	// Treat it as a pure double-quoted string unless it contains a bare " — one
+	// that is not inside a $(...)/${...} substitution. A bare " indicates adjacent
+	// quoted groups the lexer concatenated (e.g. "a""b"); quotes inside a command
+	// substitution belong to that substitution and are handled when it runs.
 	if strings.HasPrefix(w, `"`) && strings.HasSuffix(w, `"`) && len(w) >= 2 {
 		inner := w[1 : len(w)-1]
-		if !strings.ContainsRune(inner, '"') {
+		if !hasBareDoubleQuote(inner) {
 			return sh.expandInsideDoubleQuotes(inner)
 		}
 		// Fall through to expandUnquoted which handles each "..." segment separately.

@@ -182,3 +182,33 @@ func TestANSICQuoting(t *testing.T) {
 		t.Fatalf("ANSI-C tab = %q", got)
 	}
 }
+
+func TestDoubleQuotedCommandSubstitution(t *testing.T) {
+	// A $(...) with nested double quotes inside an outer double-quoted string
+	// must execute, not be treated as literal text.
+	if got := eval(t, `echo "x=[$(echo "inner")]"`); got != "x=[inner]" {
+		t.Fatalf("nested-quote cmdsub = %q", got)
+	}
+	// With a compound command (while-read) inside the quoted cmdsub.
+	src := `echo "R:$(printf 'a\nb\n' | while read l; do echo "<$l>"; done)"`
+	if got := eval(t, src); got != "R:<a>\n<b>" {
+		t.Fatalf("compound cmdsub in quotes = %q", got)
+	}
+}
+
+func TestHasBareDoubleQuote(t *testing.T) {
+	cases := map[string]bool{
+		`plain`:                false,
+		`val=$X`:               false,
+		`a"b`:                  true,  // bare quote
+		`$(echo "hi")`:         false, // quote inside cmdsub
+		`pre $(echo "x") post`: false,
+		`${v}"x`:               true,  // bare quote after ${...}
+		`$(a "b" c) "d"`:       true,  // last quote is bare
+	}
+	for in, want := range cases {
+		if got := hasBareDoubleQuote(in); got != want {
+			t.Errorf("hasBareDoubleQuote(%q) = %v, want %v", in, got, want)
+		}
+	}
+}
