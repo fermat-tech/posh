@@ -125,15 +125,16 @@ func runREPL(sh *eval.Shell) {
 		if rl == nil {
 			return
 		}
-		if f, err := os.Create(histFile); err == nil {
-			rl.WriteHistory(f)
-			f.Close()
-		}
 		rl.Close()
 		rl = nil
 	}
 
 	defer closeLiner()
+	// Persist history from sh.History, which both the emacs (liner) and vi
+	// editors append to. Saving here rather than via liner's WriteHistory means
+	// history is written in every mode and on every exit path (Ctrl+D, exit, or
+	// EOF) — the deferred call runs during the exit panic's unwinding too.
+	defer saveHistory(histFile, sh)
 
 	// Pre-load history from file into sh.History so the vi editor can use it.
 	if f, err := os.Open(histFile); err == nil {
@@ -183,6 +184,30 @@ func runREPL(sh *eval.Shell) {
 		sh.EvalString(input)
 		os.Stdout.Sync()
 	}
+}
+
+// maxHistory caps how many of the most recent entries are written to the
+// history file (mirrors the documented limit).
+const maxHistory = 1000
+
+// saveHistory writes the shell's command history to path (most recent entries
+// last), keeping at most maxHistory lines. Failures are silent so an unwritable
+// home directory never disrupts exit.
+func saveHistory(path string, sh *eval.Shell) {
+	hist := sh.History
+	if len(hist) > maxHistory {
+		hist = hist[len(hist)-maxHistory:]
+	}
+	f, err := os.Create(path)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	w := bufio.NewWriter(f)
+	for _, line := range hist {
+		fmt.Fprintln(w, line)
+	}
+	w.Flush()
 }
 
 // linerReadMultiLine reads one complete command using liner (emacs mode).
