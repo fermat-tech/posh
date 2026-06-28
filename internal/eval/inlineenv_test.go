@@ -62,3 +62,19 @@ func TestInlineEnvNoAssignsReturnsBase(t *testing.T) {
 		t.Fatalf("no-assigns env = %v", got)
 	}
 }
+
+// A command prefix in front of an alias must reach the aliased command's
+// environment (the env builtin prints the exported environment of its shell).
+func TestAliasCarriesPrefixAssignment(t *testing.T) {
+	if got := eval(t, `alias e=env; VARX=hello e`); !strings.Contains(got, "VARX=hello") {
+		t.Fatalf("alias did not carry prefix assignment; env = %q", got)
+	}
+}
+
+// A command prefix in front of a shell function reaches the function's
+// environment too.
+func TestFunctionCarriesPrefixAssignment(t *testing.T) {
+	if got := eval(t, `f() { env; }; VARY=world f`); !strings.Contains(got, "VARY=world") {
+		t.Fatalf("function did not carry prefix assignment; env = %q", got)
+	}
+}

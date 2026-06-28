@@ -641,9 +641,17 @@ func (sh *Shell) evalFuncDef(def *parser.FuncDef) int {
 	return 0
 }
 
-func (sh *Shell) callFunc(def *parser.FuncDef, args []string) (code int) {
+func (sh *Shell) callFunc(def *parser.FuncDef, args []string, assigns ...string) (code int) {
 	child := sh.fork()
 	child.posParams = args
+	// Command-prefix assignments (e.g. `VAR=val func`) apply to the function call
+	// and are exported so any commands it runs inherit them.
+	for _, a := range assigns {
+		child.applyAssign(a)
+		if ap, ok := parseAssignParts(a); ok && !ap.hasSub {
+			child.exported[ap.name] = true
+		}
+	}
 
 	defer func() {
 		if r := recover(); r != nil {
@@ -700,6 +708,15 @@ func (sh *Shell) evalSimpleCmd(cmd *parser.SimpleCmd, stdin io.Reader, stdout, s
 		if perr == nil && node != nil {
 			sub := sh.fork()
 			sub.Stdin, sub.Stdout, sub.Stderr = rStdin, rStdout, rStderr
+			// Carry any command-prefix assignments (e.g. `TZ=UTC date`) into the
+			// alias's environment so they reach the command it expands to, and
+			// export them so they reach child processes.
+			for _, a := range cmd.Assigns {
+				sub.applyAssign(a)
+				if ap, ok := parseAssignParts(a); ok && !ap.hasSub {
+					sub.exported[ap.name] = true
+				}
+			}
 			code := sub.Eval(node)
 			sh.lastExit = code
 			return code
@@ -715,7 +732,7 @@ func (sh *Shell) evalSimpleCmd(cmd *parser.SimpleCmd, stdin io.Reader, stdout, s
 
 	// Shell function check
 	if fn, ok := sh.funcs[name]; ok {
-		code := sh.callFunc(fn, words[1:])
+		code := sh.callFunc(fn, words[1:], cmd.Assigns...)
 		sh.lastExit = code
 		return code
 	}
