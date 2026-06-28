@@ -58,9 +58,9 @@ func TestSearchInteraction(t *testing.T) {
 	}
 	// Avoid terminal I/O from redraw during the test.
 	withSilencedStdout(t, func() {
-		vs.startSearch(true)             // "/"
-		vs.handleSearch(runeKey('f'))    // type "f"
-		vs.handleSearch(runeKey('o'))    // "fo"
+		vs.startSearch(true, true)    // vi "/"
+		vs.handleSearch(runeKey('f')) // type "f"
+		vs.handleSearch(runeKey('o')) // "fo"
 		vs.handleSearch(keyEvent{typ: keyEnter})
 	})
 	if got := string(vs.buf); got != "grep foo" {
@@ -68,6 +68,58 @@ func TestSearchInteraction(t *testing.T) {
 	}
 	if vs.searching {
 		t.Fatalf("search should have ended on Enter")
+	}
+}
+
+// TestViSearchRepeat: after a vi "/" search, n repeats toward older matches.
+func TestViSearchRepeat(t *testing.T) {
+	vs := &viState{
+		history: []string{"echo one", "ls", "echo two", "echo three"},
+		histIdx: 4,
+		mode:    viNormal,
+	}
+	withSilencedStdout(t, func() {
+		vs.startSearch(true, true) // "/"
+		vs.handleSearch(runeKey('e'))
+		vs.handleSearch(runeKey('c'))
+		vs.handleSearch(runeKey('h'))
+		vs.handleSearch(runeKey('o'))
+		vs.handleSearch(keyEvent{typ: keyEnter}) // -> "echo three" (idx 3)
+	})
+	if got := string(vs.buf); got != "echo three" {
+		t.Fatalf("first /echo match = %q, want %q", got, "echo three")
+	}
+	withSilencedStdout(t, func() { vs.repeatSearch(false) }) // n -> older "echo two"
+	if got := string(vs.buf); got != "echo two" {
+		t.Fatalf("after n = %q, want %q", got, "echo two")
+	}
+	withSilencedStdout(t, func() { vs.repeatSearch(true) }) // N -> newer "echo three"
+	if got := string(vs.buf); got != "echo three" {
+		t.Fatalf("after N = %q, want %q", got, "echo three")
+	}
+}
+
+// TestEmacsSearchStep: Ctrl+R steps through older matches; Ctrl+S steps newer.
+func TestEmacsSearchStep(t *testing.T) {
+	vs := &viState{
+		history: []string{"echo a", "echo b", "ls", "echo c"},
+		histIdx: 4,
+		mode:    viInsert,
+	}
+	withSilencedStdout(t, func() {
+		vs.startSearch(true, false)   // Ctrl+R
+		vs.handleSearch(runeKey('e')) // incremental -> most recent "echo c"
+	})
+	if got := string(vs.buf); got != "echo c" {
+		t.Fatalf("incremental match = %q, want %q", got, "echo c")
+	}
+	withSilencedStdout(t, func() { vs.handleSearch(keyEvent{typ: keyCtrlR}) }) // older -> "echo b"
+	if got := string(vs.buf); got != "echo b" {
+		t.Fatalf("after Ctrl+R = %q, want %q", got, "echo b")
+	}
+	withSilencedStdout(t, func() { vs.handleSearch(keyEvent{typ: keyCtrlS}) }) // newer -> "echo c"
+	if got := string(vs.buf); got != "echo c" {
+		t.Fatalf("after Ctrl+S = %q, want %q", got, "echo c")
 	}
 }
 

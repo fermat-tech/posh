@@ -201,6 +201,10 @@ func readKey() (keyEvent, error) {
 		if ch == 0x12 {
 			return keyEvent{typ: keyCtrlR}, nil
 		}
+		// Ctrl+S
+		if ch == 0x13 {
+			return keyEvent{typ: keyCtrlS}, nil
+		}
 		// Multi-byte UTF-8 (accented chars, emoji, etc.)
 		if ch >= 0x80 {
 			r, err := readUTF8Rune(ch)
