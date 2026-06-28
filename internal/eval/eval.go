@@ -57,9 +57,11 @@ func ExitCode(r any) (code int, ok bool) {
 
 // Shell holds the execution state for a posh session.
 type Shell struct {
-	name      string            // argv[0] / $0
-	vars      map[string]string // shell variables
-	exported  map[string]bool   // names exported to child processes
+	name      string                       // argv[0] / $0
+	vars      map[string]string            // scalar shell variables
+	arrays    map[string][]string          // indexed array variables
+	assoc     map[string]map[string]string // associative (string-keyed) arrays
+	exported  map[string]bool              // names exported to child processes
 	aliases   map[string]string
 	funcs     map[string]*parser.FuncDef
 	posParams []string // $1 $2 ... (set for scripts/functions)
@@ -83,6 +85,8 @@ func New(name string) *Shell {
 	sh := &Shell{
 		name:     name,
 		vars:     make(map[string]string),
+		arrays:   make(map[string][]string),
+		assoc:    make(map[string]map[string]string),
 		exported: make(map[string]bool),
 		aliases:  make(map[string]string),
 		funcs:    make(map[string]*parser.FuncDef),
@@ -137,6 +141,10 @@ func (sh *Shell) SetOpt(name string, val bool) {
 func (sh *Shell) getVar(name string) string {
 	if v, ok := sh.vars[name]; ok {
 		return v
+	}
+	// Referencing an array by name yields its first element (bash semantics).
+	if arr, ok := sh.arrays[name]; ok && len(arr) > 0 {
+		return arr[0]
 	}
 	return ""
 }
@@ -618,11 +626,7 @@ func (sh *Shell) evalSimpleCmd(cmd *parser.SimpleCmd, stdin io.Reader, stdout, s
 	// Inline assignments with no command
 	if len(cmd.Words) == 0 {
 		for _, a := range cmd.Assigns {
-			idx := strings.IndexByte(a, '=')
-			if idx < 0 {
-				continue
-			}
-			sh.setVar(a[:idx], sh.expandWord(a[idx+1:]))
+			sh.applyAssign(a)
 		}
 		return 0
 	}
@@ -826,6 +830,8 @@ func (sh *Shell) fork() *Shell {
 	child := &Shell{
 		name:      sh.name,
 		vars:      make(map[string]string),
+		arrays:    make(map[string][]string),
+		assoc:     make(map[string]map[string]string),
 		exported:  make(map[string]bool),
 		aliases:   make(map[string]string),
 		funcs:     make(map[string]*parser.FuncDef),
@@ -839,6 +845,16 @@ func (sh *Shell) fork() *Shell {
 	}
 	for k, v := range sh.vars {
 		child.vars[k] = v
+	}
+	for k, v := range sh.arrays {
+		child.arrays[k] = append([]string(nil), v...)
+	}
+	for k, m := range sh.assoc {
+		cm := make(map[string]string, len(m))
+		for kk, vv := range m {
+			cm[kk] = vv
+		}
+		child.assoc[k] = cm
 	}
 	for k, v := range sh.exported {
 		child.exported[k] = v

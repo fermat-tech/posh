@@ -63,6 +63,8 @@ func init() {
 		"ps":      builtinPs,
 		"eval":    builtinEval,
 		"mkdir":   builtinMkdir,
+		"declare": builtinDeclare,
+		"typeset": builtinDeclare,
 	}
 }
 
@@ -314,7 +316,30 @@ func builtinExport(sh *Shell, args []string, _ io.Reader, stdout, _ io.Writer) i
 
 func builtinUnset(sh *Shell, args []string, _ io.Reader, _, _ io.Writer) int {
 	for _, a := range args {
+		// unset arr[i] / unset map[key] removes one element; unset NAME the whole var.
+		if lb := strings.IndexByte(a, '['); lb > 0 && strings.HasSuffix(a, "]") {
+			name := a[:lb]
+			sub := a[lb+1 : len(a)-1]
+			if m, ok := sh.assoc[name]; ok {
+				delete(m, unprotectWord(sh.expandWord(sub)))
+				continue
+			}
+			arr, ok := sh.arrays[name]
+			if !ok {
+				continue
+			}
+			idx := int(evalArith(sh, sub))
+			if idx < 0 {
+				idx += len(arr)
+			}
+			if idx >= 0 && idx < len(arr) {
+				sh.arrays[name] = append(arr[:idx], arr[idx+1:]...)
+			}
+			continue
+		}
 		delete(sh.vars, a)
+		delete(sh.arrays, a)
+		delete(sh.assoc, a)
 		delete(sh.exported, a)
 	}
 	return 0

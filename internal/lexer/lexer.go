@@ -269,8 +269,14 @@ func (l *Lexer) Tokenize() []Token {
 				wordPos = false
 			} else {
 				w := l.readWord()
-				if !wordPos && isAssignment(w) {
-					tokens = append(tokens, Token{Type: ASSIGN, Val: w})
+				if isAssignment(w) {
+					w = l.glueArrayLiteral(w)
+					if wordPos {
+						// assignment-form word in argument position, e.g. declare's args
+						tokens = append(tokens, Token{Type: WORD, Val: w})
+					} else {
+						tokens = append(tokens, Token{Type: ASSIGN, Val: w})
+					}
 				} else {
 					tokens = append(tokens, Token{Type: WORD, Val: w})
 					wordPos = true
@@ -445,8 +451,14 @@ func (l *Lexer) Tokenize() []Token {
 			}
 
 			w := l.readWord()
-			if !wordPos && isAssignment(w) {
-				tokens = append(tokens, Token{Type: ASSIGN, Val: w})
+			if isAssignment(w) {
+				w = l.glueArrayLiteral(w)
+				if wordPos {
+					// assignment-form word in argument position, e.g. declare's args
+					tokens = append(tokens, Token{Type: WORD, Val: w})
+				} else {
+					tokens = append(tokens, Token{Type: ASSIGN, Val: w})
+				}
 			} else {
 				tokens = append(tokens, Token{Type: WORD, Val: w})
 				wordPos = true
@@ -461,21 +473,96 @@ func (l *Lexer) Tokenize() []Token {
 	return tokens
 }
 
+// isAssignment reports whether s is a variable assignment prefix. It accepts the
+// scalar form NAME=..., the append form NAME+=..., and the array-element forms
+// NAME[subscript]=... / NAME[subscript]+=... (the subscript itself is left for
+// the evaluator to interpret).
+// glueArrayLiteral, given an assignment prefix word ending in '=' (or '+='),
+// appends a following ( ... ) array literal to it so the whole thing becomes a
+// single ASSIGN token. Returns w unchanged when no '(' follows.
+func (l *Lexer) glueArrayLiteral(w string) string {
+	if ch, ok := l.peek(); !ok || ch != '(' {
+		return w
+	}
+	l.advance() // consume '('
+	return w + l.readArrayLiteral()
+}
+
+// readArrayLiteral reads from just after the opening '(' through the matching
+// ')', returning "(elem1<sep>elem2...)" where each element is a word (with the
+// usual quote sentinels applied) and elements are separated by arrayElemSep.
+// Whitespace and newlines between elements are skipped.
+func (l *Lexer) readArrayLiteral() string {
+	var sb strings.Builder
+	sb.WriteByte('(')
+	first := true
+	for {
+		for {
+			ch, ok := l.peek()
+			if !ok || (ch != ' ' && ch != '\t' && ch != '\r' && ch != '\n') {
+				break
+			}
+			l.advance()
+		}
+		ch, ok := l.peek()
+		if !ok || ch == ')' {
+			if ok {
+				l.advance()
+			}
+			break
+		}
+		elem := l.readWord()
+		if elem == "" {
+			// readWord made no progress (an operator char); skip it so we don't loop.
+			l.advance()
+			continue
+		}
+		if !first {
+			sb.WriteRune(arrayElemSep)
+		}
+		sb.WriteString(elem)
+		first = false
+	}
+	sb.WriteByte(')')
+	return sb.String()
+}
+
+// isAssignment reports whether s is a variable assignment prefix. It accepts the
+// scalar form NAME=..., the append form NAME+=..., and the array-element forms
+// NAME[subscript]=... / NAME[subscript]+=... (the subscript itself is left for
+// the evaluator to interpret).
 func isAssignment(s string) bool {
-	idx := strings.IndexByte(s, '=')
-	if idx <= 0 {
+	r := []rune(s)
+	n := len(r)
+	if n == 0 || (!unicode.IsLetter(r[0]) && r[0] != '_') {
 		return false
 	}
-	name := s[:idx]
-	for i, ch := range name {
-		if i == 0 && !unicode.IsLetter(ch) && ch != '_' {
-			return false
+	i := 1
+	for i < n && (unicode.IsLetter(r[i]) || unicode.IsDigit(r[i]) || r[i] == '_') {
+		i++
+	}
+	// optional [subscript]
+	if i < n && r[i] == '[' {
+		depth := 1
+		i++
+		for i < n && depth > 0 {
+			switch r[i] {
+			case '[':
+				depth++
+			case ']':
+				depth--
+			}
+			i++
 		}
-		if i > 0 && !unicode.IsLetter(ch) && !unicode.IsDigit(ch) && ch != '_' {
+		if depth != 0 {
 			return false
 		}
 	}
-	return true
+	// optional + of the += append operator
+	if i < n && r[i] == '+' {
+		i++
+	}
+	return i < n && r[i] == '='
 }
 
 // Private Use Area sentinels for characters inside single-quoted strings.
@@ -492,6 +579,10 @@ const protectedDoubleQuote rune = 0xE008 // prevents double-quote stripping in e
 const protectedLBrace      rune = 0xE009 // prevents brace expansion
 const protectedNewline     rune = 0xE00A // literal newline from $'...' quoting
 const protectedSingleQuote rune = 0xE00B // prevents single-quote stripping in expandUnquoted
+
+// arrayElemSep separates elements inside an array-literal assignment token, e.g.
+// the value of the ASSIGN token for arr=(a "b c" d). The evaluator splits on it.
+const arrayElemSep rune = 0xE020
 
 func (l *Lexer) readWord() string {
 	var sb strings.Builder

@@ -24,17 +24,25 @@ const protectedLBrace      rune = 0xE009
 const protectedNewline     rune = 0xE00A
 const protectedSingleQuote rune = 0xE00B
 
+// arrayFieldSep marks an element boundary produced by ${arr[@]} or $@. It splits
+// into separate words in a list context (expandWords) even inside double quotes,
+// and collapses to a space in any scalar/string context (here, via unprotectWord).
+const arrayFieldSep rune = 0xE021
+
 func unprotectWord(s string) string {
 	if !strings.ContainsAny(s, string([]rune{
 		protectedSpace, protectedTab, protectedDollar,
 		protectedBackslash, protectedStar, protectedQuestion, protectedLBracket,
 		protectedDoubleQuote, protectedSingleQuote, protectedLBrace, protectedNewline,
+		arrayFieldSep,
 	})) {
 		return s
 	}
 	var sb strings.Builder
 	for _, r := range s {
 		switch r {
+		case arrayFieldSep:
+			sb.WriteByte(' ')
 		case protectedSpace:
 			sb.WriteByte(' ')
 		case protectedTab:
@@ -80,17 +88,25 @@ func (sh *Shell) expandWords(words []string) []string {
 
 	var result []string
 	for _, w := range braced {
-		// Double-quoted strings are not word-split or glob-expanded
+		expanded := sh.expandWord(w)
+		// A ${arr[@]} / $@ expansion separates its elements with arrayFieldSep,
+		// which becomes a word boundary here even inside double quotes.
+		fields := strings.Split(expanded, string(arrayFieldSep))
+
+		// Double-quoted strings are not word-split or glob-expanded; each array
+		// element is still its own word, though.
 		if strings.HasPrefix(w, `"`) && strings.HasSuffix(w, `"`) && len(w) >= 2 {
-			result = append(result, unprotectWord(sh.expandWord(w)))
+			for _, f := range fields {
+				result = append(result, unprotectWord(f))
+			}
 			continue
 		}
-		expanded := sh.expandWord(w)
-		// Word splitting: split on IFS characters if expansion produced spaces/tabs
-		parts := sh.wordSplit(expanded)
-		for _, part := range parts {
-			for _, g := range sh.globExpand(part) {
-				result = append(result, unprotectWord(g))
+		for _, f := range fields {
+			// Word splitting: split on IFS characters if expansion produced spaces/tabs
+			for _, part := range sh.wordSplit(f) {
+				for _, g := range sh.globExpand(part) {
+					result = append(result, unprotectWord(g))
+				}
 			}
 		}
 	}
@@ -298,7 +314,11 @@ func (sh *Shell) expandDollar(runes []rune, i int) (string, int) {
 	case '0':
 		return sh.name, 2
 
-	case '@', '*':
+	case '@':
+		// $@ keeps each positional parameter as its own word (even when quoted).
+		return strings.Join(sh.posParams, string(arrayFieldSep)), 2
+
+	case '*':
 		return strings.Join(sh.posParams, " "), 2
 
 	case '#':
@@ -356,6 +376,13 @@ func (sh *Shell) expandBrace(runes []rune, i int) (string, int) {
 	}
 	inner := string(runes[i+2 : j])
 	consumed := j - i + 1
+
+	// Array references: ${a[i]}, ${a[@]}, ${#a[@]}, ${!a[@]}, etc.
+	if strings.ContainsRune(inner, '[') {
+		if val, ok := sh.expandArrayBrace(inner); ok {
+			return val, consumed
+		}
+	}
 
 	// ${VAR:-default}
 	if idx := strings.Index(inner, ":-"); idx >= 0 {

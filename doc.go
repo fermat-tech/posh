@@ -82,6 +82,29 @@ Single quotes preserve every character literally; double quotes allow parameter,
 command, and arithmetic substitution while suppressing word splitting and
 globbing; a backslash escapes the following character.
 
+# Arrays
+
+Posh supports indexed and associative arrays:
+
+	arr=(one two three)          Indexed array literal.
+	arr[1]=TWO                   Assign a single element (arithmetic subscript).
+	arr+=(four)                  Append elements.
+	echo "${arr[1]}"             Element by index (negative counts from the end).
+	echo "${arr[@]}"             All elements (each a separate word when quoted).
+	echo "${arr[*]}"             All elements joined into one word.
+	echo "${#arr[@]}"            Number of elements.
+	echo "${#arr[1]}"            Character length of one element.
+	echo "${!arr[@]}"            The indices.
+
+	declare -A m                 Declare an associative (string-keyed) array.
+	m[admin]=rw                  Assign by key.
+	declare -A m=([a]=1 [b]=2)   Inline initialization.
+	echo "${m[admin]}"           Value for a key.
+	echo "${!m[@]}"              The keys (sorted); "${m[@]}" gives the values.
+
+A bare reference ($arr or ${arr}) yields element 0. `unset arr[i]` removes one
+element; `unset arr` removes the whole variable.
+
 # Control flow
 
 Posh implements the standard compound commands:
@@ -129,6 +152,7 @@ A pipeline ending in "&" runs in the background; "jobs" lists active jobs, and
 	unset     Remove a variable.
 	env       Print the exported environment.
 	set       Set shell variables and options (set -o).
+	declare   Declare variables/arrays (declare -A / -a); alias typeset.
 	source/.  Execute a file in the current shell context.
 	alias     Define or list aliases.
 	unalias   Remove aliases.

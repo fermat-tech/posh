@@ -83,6 +83,26 @@ echo $?               # last exit code
 echo $$               # current PID
 ```
 
+### Arrays
+```sh
+# indexed
+arr=(one two three)
+arr[1]=TWO            # set one element
+arr+=(four)           # append
+echo "${arr[1]}"      # one element (negative index counts from the end)
+echo "${arr[@]}"      # all elements (each its own word when quoted)
+echo "${#arr[@]}"     # number of elements
+echo "${#arr[1]}"     # length of one element
+echo "${!arr[@]}"     # the indices
+
+# associative
+declare -A roles=([admin]=rw [guest]=r)
+roles[user]=r
+echo "${roles[admin]}"   # value by key
+echo "${!roles[@]}"      # keys (sorted); "${roles[@]}" gives the values
+echo "${#roles[@]}"      # number of entries
+```
+
 ### Command substitution
 ```sh
 echo "Today is $(date)"
@@ -139,6 +159,7 @@ jobs
 | `unset VAR...` | Remove variable |
 | `env` | Print exported environment |
 | `set [VAR=val]` | Set or list shell variables |
+| `declare [-A\|-a] name` | Declare variables/arrays (`typeset` alias) |
 | `source FILE` / `. FILE` | Execute file in current shell context |
 | `alias [name[=val]]` | Define or list aliases |
 | `unalias name...` | Remove aliases |
