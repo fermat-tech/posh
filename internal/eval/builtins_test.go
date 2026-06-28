@@ -75,6 +75,16 @@ func TestAliasExpansion(t *testing.T) {
 	if got := eval(t, `alias greet='echo hi'; unalias greet; greet 2>/dev/null; echo done`); got == "" {
 		t.Fatalf("unalias produced no output")
 	}
+	// Arguments to an aliased command are already fully expanded; they must not be
+	// re-split or re-globbed when the alias is rebuilt and re-parsed. A quoted
+	// argument with surrounding spaces (e.g. file -F ' : ') must reach the command
+	// intact rather than collapsing to ":".
+	if got := eval(t, `alias p='printf [%s]'; p ' : '`); got != "[ : ]" {
+		t.Fatalf("alias arg whitespace not preserved: %q", got)
+	}
+	if got := eval(t, `alias p='printf [%s]'; p "a  b"`); got != "[a  b]" {
+		t.Fatalf("alias arg internal spaces collapsed: %q", got)
+	}
 }
 
 func TestCdAndPwd(t *testing.T) {

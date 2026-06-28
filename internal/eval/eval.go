@@ -700,9 +700,15 @@ func (sh *Shell) evalSimpleCmd(cmd *parser.SimpleCmd, stdin io.Reader, stdout, s
 
 	// Alias expansion
 	if expanded, ok := sh.aliases[name]; ok {
+		// The alias body (expanded) is trusted text that must be lexed and
+		// expanded normally. The trailing arguments in words[1:], however, have
+		// already been through full word expansion (quote-stripping, splitting,
+		// globbing); re-lexing them bare would split/glob them a second time and
+		// corrupt embedded whitespace (e.g. an arg of " : " would collapse to
+		// ":"). Single-quote each so the re-parse takes them verbatim.
 		full := expanded
-		if len(words) > 1 {
-			full += " " + strings.Join(words[1:], " ")
+		for _, w := range words[1:] {
+			full += " " + shellSingleQuote(w)
 		}
 		node, perr := parser.Parse(full)
 		if perr == nil && node != nil {
@@ -825,6 +831,14 @@ func (sh *Shell) evalSimpleCmd(cmd *parser.SimpleCmd, stdin io.Reader, stdout, s
 	}
 	sh.lastExit = 0
 	return 0
+}
+
+// shellSingleQuote wraps s in single quotes so it survives a re-lex verbatim,
+// escaping any embedded single quotes the POSIX way ('\''). Used when rebuilding
+// a command line from already-expanded words (e.g. alias expansion) so the
+// second parse does not split, glob, or otherwise re-interpret them.
+func shellSingleQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 // runCaptured runs a shell string and captures its stdout.
