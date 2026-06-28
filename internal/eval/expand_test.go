@@ -57,6 +57,18 @@ func TestCommandSubstitution(t *testing.T) {
 	}
 }
 
+func TestCommandSubstitutionStripsCR(t *testing.T) {
+	// Windows tools emit CRLF; command substitution must not leave stray \r on
+	// the captured value or on the words it splits into.
+	if got := eval(t, `x=$(printf 'hi\r\n'); printf '[%s]' "$x"`); got != "[hi]" {
+		t.Fatalf("scalar capture = %q, want [hi]", got)
+	}
+	got := eval(t, `for n in $(printf '1\r\n2\r\n3\r\n'); do printf '[%s]' "$n"; done`)
+	if got != "[1][2][3]" {
+		t.Fatalf("split capture = %q, want [1][2][3]", got)
+	}
+}
+
 func TestArithmeticExpansion(t *testing.T) {
 	cases := map[string]string{
 		`echo $((2 + 3 * 4))`:   "14",

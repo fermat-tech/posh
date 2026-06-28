@@ -435,6 +435,11 @@ func (sh *Shell) expandCmdSub(runes []rune, i int) (string, int) {
 	if err != nil {
 		return "", consumed
 	}
+	// Normalize CRLF to LF: the captured output becomes a shell string value, and
+	// Windows tools emit CRLF, so a stray \r would otherwise cling to each
+	// word after splitting (e.g. "1\r") and corrupt later output. Then strip
+	// trailing newlines, as command substitution does.
+	out = strings.ReplaceAll(out, "\r\n", "\n")
 	return strings.TrimRight(out, "\n"), consumed
 }
 
