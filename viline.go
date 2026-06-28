@@ -35,6 +35,7 @@ const (
 	keyCtrlU
 	keyCtrlW
 	keyCtrlK
+	keyCtrlR
 	keyEOF
 	keyInterrupt
 	keyTab
@@ -92,6 +93,16 @@ type viState struct {
 	completer    completeFn
 	lastTabBuf   string // line at the last Tab press (for double-Tab detection)
 
+	// Incremental history search (vi: /, ?, n, N; also Ctrl+R). While searching,
+	// keystrokes build searchInput and the editor shows a search prompt; the most
+	// recent matching history entry is previewed live. searchOlder is the search
+	// direction (older vs newer); searchLast remembers the pattern for n/N.
+	searching   bool
+	searchInput []rune
+	searchOlder bool
+	searchLast  string
+	searchOrig  []rune // buffer to restore if the search is cancelled
+
 	// Multi-line editing. The buffer is a single logical command that may contain
 	// embedded newlines (added when Enter is pressed while the command is
 	// incomplete). prompt is PS1 for the first row; prompt2 (PS2) prefixes each
@@ -148,6 +159,11 @@ func viReadLine(prompt, prompt2 string, history []string, completer completeFn, 
 		if err != nil {
 			vs.endLine()
 			return string(vs.buf), err
+		}
+
+		if vs.searching {
+			vs.handleSearch(key)
+			continue
 		}
 
 		var done bool
@@ -256,6 +272,9 @@ func (vs *viState) handleInsert(key keyEvent) (done bool, line string, err error
 		}
 	case keyTab:
 		vs.doComplete()
+		return false, "", nil
+	case keyCtrlR:
+		vs.startSearch(true)
 		return false, "", nil
 	case keyRune:
 		vs.saveUndo()
@@ -380,6 +399,9 @@ func (vs *viState) handleNormal(key keyEvent) (done bool, line string, err error
 		}
 	case keyEscape:
 		// already normal
+	case keyCtrlR:
+		vs.startSearch(true)
+		return false, "", nil
 	case keyRune:
 		vs.handleNormalRune(key.r)
 		vs.redraw()
@@ -606,6 +628,14 @@ func (vs *viState) handleNormalRune(r rune) {
 		vs.historyUp()
 	case 'j', '+':
 		vs.historyDown()
+	case '/':
+		vs.startSearch(true) // search toward older history
+	case '?':
+		vs.startSearch(false) // search toward newer history
+	case 'n':
+		vs.repeatSearch(false)
+	case 'N':
+		vs.repeatSearch(true)
 	}
 }
 
@@ -651,6 +681,110 @@ func (vs *viState) historyDown() {
 			vs.buf = []rune(vs.history[vs.histIdx])
 		}
 		vs.pos = 0
+	}
+}
+
+// ---- history search ----
+
+// searchHistoryIn returns the index of the nearest history entry containing pat,
+// scanning toward older entries (older=true, decreasing index) or newer entries
+// (older=false, increasing index) starting just past from. Returns -1 if none.
+func searchHistoryIn(history []string, pat string, older bool, from int) int {
+	if pat == "" {
+		return -1
+	}
+	if older {
+		for i := from - 1; i >= 0 && i < len(history); i-- {
+			if strings.Contains(history[i], pat) {
+				return i
+			}
+		}
+		return -1
+	}
+	for i := from + 1; i < len(history); i++ {
+		if strings.Contains(history[i], pat) {
+			return i
+		}
+	}
+	return -1
+}
+
+// startSearch enters incremental history search. older=true is the vi "/" /
+// Ctrl+R direction (toward older commands); older=false is "?" (toward newer).
+func (vs *viState) startSearch(older bool) {
+	vs.searching = true
+	vs.searchOlder = older
+	vs.searchInput = nil
+	vs.searchOrig = append([]rune(nil), vs.buf...)
+	vs.redraw()
+}
+
+// applySearch previews the nearest match for the current pattern, leaving the
+// search active so the pattern can keep changing.
+func (vs *viState) applySearch() {
+	if idx := searchHistoryIn(vs.history, string(vs.searchInput), vs.searchOlder, len(vs.history)); idx >= 0 {
+		vs.histIdx = idx
+		vs.buf = []rune(vs.history[idx])
+		vs.pos = 0
+	}
+	vs.redraw()
+}
+
+// handleSearch processes a keystroke while in history-search mode.
+func (vs *viState) handleSearch(key keyEvent) {
+	switch key.typ {
+	case keyEnter:
+		// Accept the current match and return to normal-mode editing.
+		vs.searching = false
+		vs.searchLast = string(vs.searchInput)
+		vs.mode = viNormal
+		if vs.pos >= len(vs.buf) && vs.pos > 0 {
+			vs.pos = len(vs.buf) - 1
+		}
+		vs.redraw()
+	case keyEscape, keyInterrupt:
+		// Cancel: restore the buffer as it was before the search.
+		vs.searching = false
+		vs.buf = vs.searchOrig
+		vs.pos = 0
+		vs.histIdx = len(vs.history)
+		vs.redraw()
+	case keyCtrlR:
+		// Step to the next older match for the current pattern.
+		if idx := searchHistoryIn(vs.history, string(vs.searchInput), vs.searchOlder, vs.histIdx); idx >= 0 {
+			vs.histIdx = idx
+			vs.buf = []rune(vs.history[idx])
+			vs.pos = 0
+		}
+		vs.redraw()
+	case keyBackspace:
+		if len(vs.searchInput) > 0 {
+			vs.searchInput = vs.searchInput[:len(vs.searchInput)-1]
+		}
+		vs.applySearch()
+	case keyRune:
+		vs.searchInput = append(vs.searchInput, key.r)
+		vs.applySearch()
+	}
+}
+
+// repeatSearch advances to the next match in the same (reverse=false) or
+// opposite (reverse=true) direction as the last search, for vi n / N.
+func (vs *viState) repeatSearch(reverse bool) {
+	if vs.searchLast == "" {
+		return
+	}
+	older := vs.searchOlder
+	if reverse {
+		older = !older
+	}
+	if idx := searchHistoryIn(vs.history, vs.searchLast, older, vs.histIdx); idx >= 0 {
+		vs.histIdx = idx
+		vs.buf = []rune(vs.history[idx])
+		vs.pos = 0
+		if vs.pos >= len(vs.buf) && vs.pos > 0 {
+			vs.pos = len(vs.buf) - 1
+		}
 	}
 }
 
@@ -745,7 +879,18 @@ func (vs *viState) redraw() {
 	if cols < 1 {
 		cols = 80
 	}
-	out, cursorRow := renderMultiline(vs.prompt, vs.prompt2, vs.buf, vs.pos, cols, vs.originCol, vs.prevCursorRow)
+	ps1, ps2 := vs.prompt, vs.prompt2
+	if vs.searching {
+		// Show a bash-style incremental-search prompt; the matched command is
+		// previewed in the buffer.
+		label := "reverse-i-search"
+		if !vs.searchOlder {
+			label = "i-search"
+		}
+		ps1 = "(" + label + ")`" + string(vs.searchInput) + "': "
+		ps2 = ps1
+	}
+	out, cursorRow := renderMultiline(ps1, ps2, vs.buf, vs.pos, cols, vs.originCol, vs.prevCursorRow)
 	vs.prevCursorRow = cursorRow
 	fmt.Fprint(os.Stdout, out)
 }

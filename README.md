@@ -205,10 +205,14 @@ PS1='\u@\h \w \$ '
 | Key | Action |
 |-----|--------|
 | Up / Down | Navigate history |
-| Ctrl+R | Reverse history search |
+| Ctrl+R | Incremental reverse history search |
 | Ctrl+C | Interrupt (return to prompt) |
 | Ctrl+D | Exit on empty line |
 | Tab | Filename completion |
+
+In **vi mode** (`set -o vi`), history search is also available from command mode:
+`/pattern` searches toward older commands, `?pattern` toward newer, and `n` / `N`
+repeat the search in the same / opposite direction.
 
 History is saved to `~/.posh_history` (max 1000 entries).
 

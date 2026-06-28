@@ -149,6 +149,8 @@ func readKey() (keyEvent, error) {
 			return keyEvent{typ: keyEnter}, nil
 		case 0x0b:
 			return keyEvent{typ: keyCtrlK}, nil
+		case 0x12:
+			return keyEvent{typ: keyCtrlR}, nil
 		case 0x15:
 			return keyEvent{typ: keyCtrlU}, nil
 		case 0x17:
