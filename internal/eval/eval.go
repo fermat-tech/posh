@@ -933,6 +933,12 @@ func preprocessHeredocs(input string) string {
 	if !strings.Contains(input, "<<") {
 		return input
 	}
+	// Already preprocessed: command-substitution content carries heredoc bodies
+	// that an outer pass inlined as \x01.. / \x03.. markers. Re-splitting on the
+	// markers' embedded newlines would corrupt them, so leave such input alone.
+	if strings.ContainsAny(input, "\x01\x03") {
+		return input
+	}
 	lines := strings.Split(input, "\n")
 
 	// One pending body marker to splice into a command line, at insertPos.

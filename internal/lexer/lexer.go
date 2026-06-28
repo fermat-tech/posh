@@ -943,6 +943,7 @@ func (l *Lexer) readNestedParens(sb *strings.Builder) {
 	for depth > 0 {
 		ch, ok := l.peek()
 		if !ok {
+			l.Incomplete = true // unterminated $( ... ): needs more input
 			break
 		}
 		l.advance()
@@ -991,6 +992,7 @@ func (l *Lexer) readUntilClose(open, close rune, sb *strings.Builder) {
 	for depth > 0 {
 		ch, ok := l.peek()
 		if !ok {
+			l.Incomplete = true // unterminated ${ ... } / nested group: needs more input
 			break
 		}
 		l.advance()

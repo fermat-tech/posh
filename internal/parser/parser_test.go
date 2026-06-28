@@ -193,6 +193,10 @@ func TestNeedsContinuation(t *testing.T) {
 		"cat << EOF\nbody",
 		"name=(Grouch",         // unterminated array literal
 		"name=(\n  a\n  b",     // array literal still open across lines
+		"echo $(echo hi",       // unterminated command substitution
+		"echo ${VAR",           // unterminated ${...}
+		// heredoc inside $() with the closing ) on a later line
+		"echo $(cat << EOF | cat\nbody\nEOF",
 	}
 	for _, s := range cont {
 		if !NeedsContinuation(s) {
@@ -207,6 +211,9 @@ func TestNeedsContinuation(t *testing.T) {
 		"(a; b)",
 		"name=(a b c)",            // terminated array literal
 		"name=(\n  a\n  b\n)",     // multi-line array literal, closed
+		"echo $(echo hi)",         // closed command substitution
+		"echo ${VAR}",             // closed ${...}
+		"echo $(cat << EOF | cat\nbody\nEOF\n)", // heredoc in $(), ) supplied
 		// Keywords used as ordinary words must NOT be treated as open blocks.
 		"echo this is a multiline string for testing",
 		"echo for testing",

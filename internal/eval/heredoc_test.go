@@ -21,6 +21,16 @@ func TestHeredocIntoPipeline(t *testing.T) {
 	}
 }
 
+func TestHeredocInCommandSubstitution(t *testing.T) {
+	// A heredoc feeding a pipeline inside $(...), with the closing ) on its own
+	// line after the delimiter (the reported case). Use <> markers so the
+	// captured output isn't glob-expanded by the outer echo.
+	src := "echo $(cat << 'HD' | while read l; do echo \"<$l>\"; done\na\nb\nc\nHD\n)"
+	if got := eval(t, src); got != "<a> <b> <c>" {
+		t.Fatalf("heredoc in cmdsub = %q", got)
+	}
+}
+
 func TestHeredocQuotedDelimiterIsLiteral(t *testing.T) {
 	src := "NAME=posh\ncat << 'EOF'\nhello $NAME\nEOF"
 	if got := eval(t, src); got != "hello $NAME" {
