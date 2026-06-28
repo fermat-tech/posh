@@ -107,16 +107,8 @@ func runREPL(sh *eval.Shell) {
 	// panic unwinds through this defer).
 	defer saveHistory(histFile, sh)
 
-	// Pre-load history from file into sh.History.
-	if f, err := os.Open(histFile); err == nil {
-		sc := bufio.NewScanner(f)
-		for sc.Scan() {
-			if line := sc.Text(); line != "" {
-				sh.History = append(sh.History, line)
-			}
-		}
-		f.Close()
-	}
+	// Pre-load history from the file into sh.History.
+	sh.History = append(sh.History, loadHistory(histFile)...)
 
 	for {
 		// Both editing modes use the same editor; emacs mode is simply vi mode
@@ -148,8 +140,10 @@ func runREPL(sh *eval.Shell) {
 const maxHistory = 1000
 
 // saveHistory writes the shell's command history to path (most recent entries
-// last), keeping at most maxHistory lines. Failures are silent so an unwritable
-// home directory never disrupts exit.
+// last), keeping at most maxHistory entries. Each entry is encoded onto a single
+// physical line so multi-line commands (heredocs, quoted strings spanning lines)
+// round-trip as one history entry. Failures are silent so an unwritable home
+// directory never disrupts exit.
 func saveHistory(path string, sh *eval.Shell) {
 	hist := sh.History
 	if len(hist) > maxHistory {
@@ -162,9 +156,83 @@ func saveHistory(path string, sh *eval.Shell) {
 	defer f.Close()
 	w := bufio.NewWriter(f)
 	for _, line := range hist {
-		fmt.Fprintln(w, line)
+		fmt.Fprintln(w, encodeHistoryLine(line))
 	}
 	w.Flush()
+}
+
+// loadHistory reads the history file, decoding the single-line encoding so that
+// multi-line commands are restored as one entry each. Returns nil if the file
+// can't be read.
+func loadHistory(path string) []string {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil
+	}
+	defer f.Close()
+	var hist []string
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024) // allow long encoded lines
+	for sc.Scan() {
+		if line := sc.Text(); line != "" {
+			hist = append(hist, decodeHistoryLine(line))
+		}
+	}
+	return hist
+}
+
+// encodeHistoryLine escapes a history entry so it occupies a single physical
+// line in the history file: backslash, newline, and carriage return become \\,
+// \n, and \r. decodeHistoryLine reverses it.
+func encodeHistoryLine(s string) string {
+	if !strings.ContainsAny(s, "\\\n\r") {
+		return s
+	}
+	var b strings.Builder
+	for _, r := range s {
+		switch r {
+		case '\\':
+			b.WriteString(`\\`)
+		case '\n':
+			b.WriteString(`\n`)
+		case '\r':
+			b.WriteString(`\r`)
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+// decodeHistoryLine reverses encodeHistoryLine, restoring embedded newlines.
+// Unrecognized escapes are left as-is, so plain entries from older history files
+// (no escaping) load unchanged.
+func decodeHistoryLine(s string) string {
+	if !strings.ContainsRune(s, '\\') {
+		return s
+	}
+	var b strings.Builder
+	rs := []rune(s)
+	for i := 0; i < len(rs); i++ {
+		if rs[i] == '\\' && i+1 < len(rs) {
+			switch rs[i+1] {
+			case 'n':
+				b.WriteByte('\n')
+				i++
+				continue
+			case 'r':
+				b.WriteByte('\r')
+				i++
+				continue
+			case '\\':
+				b.WriteByte('\\')
+				i++
+				continue
+			}
+		}
+		b.WriteRune(rs[i])
+	}
+	return b.String()
 }
 
 // viReadMultiLine reads one complete command using posh's line editor. The

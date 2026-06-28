@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/fermat-tech/posh/internal/eval"
@@ -51,29 +52,63 @@ func TestSaveHistoryCapsToMax(t *testing.T) {
 	}
 }
 
-// TestHistoryRoundTrip mirrors the REPL's load step (read file into sh.History)
-// and confirms a save then load preserves the entries.
+// TestHistoryRoundTrip saves then loads and confirms the entries survive.
 func TestHistoryRoundTrip(t *testing.T) {
 	path := filepath.Join(t.TempDir(), ".posh_history")
 	src := eval.New("posh")
 	src.History = []string{"one", "two", "three"}
 	saveHistory(path, src)
 
-	// Load the way runREPL does.
-	dst := eval.New("posh")
-	f, err := os.Open(path)
-	if err != nil {
-		t.Fatalf("open: %v", err)
+	got := loadHistory(path)
+	if len(got) != 3 || got[0] != "one" || got[2] != "three" {
+		t.Fatalf("round-trip history = %v", got)
 	}
-	sc := bufio.NewScanner(f)
-	for sc.Scan() {
-		if line := sc.Text(); line != "" {
-			dst.History = append(dst.History, line)
+}
+
+// TestHistoryMultilineRoundTrip is the regression for multi-line commands
+// (heredocs, quoted strings spanning lines): each must survive save+load as a
+// single entry, not be split into separate lines.
+func TestHistoryMultilineRoundTrip(t *testing.T) {
+	path := filepath.Join(t.TempDir(), ".posh_history")
+	src := eval.New("posh")
+	src.History = []string{
+		"echo start",
+		"cat << EOF\nline one\nline two\nEOF",
+		`echo "a` + "\n" + `b"`,
+		"echo end",
+	}
+	saveHistory(path, src)
+
+	got := loadHistory(path)
+	if len(got) != len(src.History) {
+		t.Fatalf("got %d entries, want %d: %q", len(got), len(src.History), got)
+	}
+	for i := range src.History {
+		if got[i] != src.History[i] {
+			t.Fatalf("entry %d = %q, want %q", i, got[i], src.History[i])
 		}
 	}
-	f.Close()
+	// The heredoc entry must still contain its embedded newlines.
+	if !strings.Contains(got[1], "\nline one\nline two\n") {
+		t.Fatalf("heredoc entry lost its newlines: %q", got[1])
+	}
+}
 
-	if len(dst.History) != 3 || dst.History[0] != "one" || dst.History[2] != "three" {
-		t.Fatalf("round-trip history = %v", dst.History)
+func TestEncodeDecodeHistoryLine(t *testing.T) {
+	cases := []string{
+		"plain",
+		"with\nnewline",
+		"two\nembedded\nnewlines",
+		`literal backslash \ and \n sequence`,
+		"trailing\n",
+	}
+	for _, s := range cases {
+		if got := decodeHistoryLine(encodeHistoryLine(s)); got != s {
+			t.Errorf("round-trip %q -> %q", s, got)
+		}
+		// The encoded form must be a single physical line.
+		if strings.ContainsAny(encodeHistoryLine(s), "\n\r") {
+			t.Errorf("encoded %q still contains a raw newline", s)
+		}
 	}
 }
