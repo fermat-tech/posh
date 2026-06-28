@@ -1,7 +1,6 @@
 package eval
 
 import (
-	"bufio"
 	"fmt"
 	"io"
 	"os"
@@ -879,16 +878,12 @@ func builtinRead(sh *Shell, args []string, stdin io.Reader, stdout, _ io.Writer)
 		fmt.Fprint(stdout, prompt)
 	}
 
-	reader := bufio.NewReader(stdin)
-	line, err := reader.ReadString('\n')
-	if err != nil && len(line) == 0 {
+	// Read exactly one line, byte by byte, so we do not consume past the newline.
+	// A buffered reader would read ahead and swallow the rest of the input (e.g.
+	// the remaining lines of a pipe), breaking `while read ...; do ...; done`.
+	line, ok := readShellLine(stdin, rawMode)
+	if !ok {
 		return 1
-	}
-	line = strings.TrimRight(line, "\r\n")
-
-	if !rawMode {
-		// Handle backslash-newline continuation (shouldn't appear at this level but be safe)
-		line = strings.ReplaceAll(line, "\\\n", "")
 	}
 
 	if len(varNames) == 0 {
@@ -915,6 +910,38 @@ func builtinRead(sh *Shell, args []string, stdin io.Reader, stdout, _ io.Writer)
 		}
 	}
 	return 0
+}
+
+// readShellLine reads a single logical line from r one byte at a time, so it
+// consumes nothing beyond the terminating newline (a buffered reader would read
+// ahead and drain a pipe). It returns ok=false only at EOF with no data. Unless
+// raw is set, a trailing unescaped backslash continues the line onto the next.
+func readShellLine(r io.Reader, raw bool) (string, bool) {
+	var sb []byte
+	b := make([]byte, 1)
+	got := false
+	for {
+		n, err := r.Read(b)
+		if n > 0 {
+			got = true
+			c := b[0]
+			if c == '\n' {
+				if !raw && len(sb) > 0 && sb[len(sb)-1] == '\\' {
+					sb = sb[:len(sb)-1] // backslash-newline: continue reading
+					continue
+				}
+				break
+			}
+			sb = append(sb, c)
+		}
+		if err != nil {
+			if !got {
+				return "", false
+			}
+			break
+		}
+	}
+	return strings.TrimRight(string(sb), "\r"), true
 }
 
 func splitByIFS(s, ifs string) []string {

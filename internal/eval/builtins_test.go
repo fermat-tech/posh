@@ -155,3 +155,27 @@ func TestShiftBuiltin(t *testing.T) {
 		t.Fatalf("shift in function = %q", got)
 	}
 }
+
+func TestReadLoopConsumesAllLines(t *testing.T) {
+	// `read` must not read past its line, so a while-read loop over a pipe sees
+	// every line (the classic buffered-reader bug).
+	got := eval(t, `printf 'a\nb\nc\n' | while read x; do echo "got:$x"; done`)
+	if got != "got:a\ngot:b\ngot:c" {
+		t.Fatalf("while read loop = %q", got)
+	}
+}
+
+func TestReadSplitsIntoVars(t *testing.T) {
+	got := eval(t, `printf '1 2 3\n4 5 6\n' | while read a b; do echo "[$a|$b]"; done`)
+	if got != "[1|2 3]\n[4|5 6]" {
+		t.Fatalf("read into vars = %q", got)
+	}
+}
+
+func TestReadHeredocPipeline(t *testing.T) {
+	// The reported case: heredoc piped into a while-read loop.
+	src := "cat << 'EOF' | while read line; do echo \"$line\"; done\nhi\nstar\nthere\nEOF"
+	if got := eval(t, src); got != "hi\nstar\nthere" {
+		t.Fatalf("heredoc | while read = %q", got)
+	}
+}
