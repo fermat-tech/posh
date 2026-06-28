@@ -103,7 +103,10 @@ type viState struct {
 	// Multi-row redraw state: the rendered prompt+buffer block can span several
 	// terminal rows (from wrapping and/or embedded newlines). prevCursorRow is
 	// the cursor's row within that block at the last redraw, used to move back to
-	// the top of the block before repainting.
+	// the top of the block before repainting. originCol is the column where the
+	// prompt begins on the first row — non-zero when the previous command left
+	// partial-line output — so the editor draws after it instead of erasing it.
+	originCol     int
 	prevCursorRow int
 }
 
@@ -133,6 +136,10 @@ func viReadLine(prompt, prompt2 string, history []string, completer completeFn, 
 		mode:       viInsert,
 		completer:  completer,
 		continueFn: continueFn,
+		// Draw the prompt at the cursor's current column so partial-line output
+		// from the previous command (e.g. printf with no trailing newline) is
+		// preserved, matching bash.
+		originCol: cursorColumn(),
 	}
 	vs.redraw()
 
@@ -738,7 +745,7 @@ func (vs *viState) redraw() {
 	if cols < 1 {
 		cols = 80
 	}
-	out, cursorRow := renderMultiline(vs.prompt, vs.prompt2, vs.buf, vs.pos, cols, vs.prevCursorRow)
+	out, cursorRow := renderMultiline(vs.prompt, vs.prompt2, vs.buf, vs.pos, cols, vs.originCol, vs.prevCursorRow)
 	vs.prevCursorRow = cursorRow
 	fmt.Fprint(os.Stdout, out)
 }
@@ -752,14 +759,14 @@ type rowCol struct{ row, col int }
 // the column at cols ("pending wrap"); the next printable character then starts
 // a new row, matching how terminals behave. endRow is the row of the final
 // position. Pure, so the wrapping math can be tested directly.
-func vlLayout(ps1, ps2 string, buf []rune, cols int) (positions []rowCol, endRow int) {
+func vlLayout(ps1, ps2 string, buf []rune, cols, originCol int) (positions []rowCol, endRow int) {
 	if cols < 1 {
 		cols = 80
 	}
 	positions = make([]rowCol, len(buf)+1)
 	row := 0
-	col := visibleLen(ps1)
-	for col >= cols { // unusually long prompt
+	col := originCol + visibleLen(ps1) // first row begins where the prompt is drawn
+	for col >= cols {                  // prompt past the right edge (or long prompt)
 		row++
 		col -= cols
 	}
@@ -796,27 +803,34 @@ func vlLayout(ps1, ps2 string, buf []rune, cols int) (positions []rowCol, endRow
 }
 
 // renderMultiline produces the output that repaints ps1+buf (continuation rows
-// prefixed by ps2) with the cursor at pos. It moves up to the top of the
-// previously rendered block (prevCursorRow rows), clears everything below, then
-// rewrites the prompt and buffer relying on terminal autowrap for soft wraps and
-// emitting CR+LF (plus ps2) for embedded newlines. Finally it moves the cursor
-// to its target row and column. Returns the output and the cursor's row within
-// the new block (to pass back as prevCursorRow next time).
-func renderMultiline(ps1, ps2 string, buf []rune, pos, cols, prevCursorRow int) (out string, cursorRow int) {
+// prefixed by ps2) with the cursor at pos. The block begins at column originCol
+// on its first row (non-zero when the previous command left partial-line output,
+// which must be preserved). It moves up to the top of the previously rendered
+// block (prevCursorRow rows), back to originCol, clears from there to the end of
+// the screen, then rewrites the prompt and buffer relying on terminal autowrap
+// for soft wraps and emitting CR+LF (plus ps2) for embedded newlines. Finally it
+// moves the cursor to its target row and column. Returns the output and the
+// cursor's row within the new block (to pass back as prevCursorRow next time).
+func renderMultiline(ps1, ps2 string, buf []rune, pos, cols, originCol, prevCursorRow int) (out string, cursorRow int) {
 	if cols < 1 {
 		cols = 80
 	}
-	positions, endRow := vlLayout(ps1, ps2, buf, cols)
+	positions, endRow := vlLayout(ps1, ps2, buf, cols, originCol)
 	cur := positions[pos]
 
 	var sb strings.Builder
 
-	// Move to the top-left of the previous render, then clear it and everything
-	// below in one shot.
+	// Move up to the block's first row, back to the origin column, then clear
+	// from there down. Clearing from originCol (rather than column 0) preserves
+	// any partial-line output to the left of the prompt.
 	if prevCursorRow > 0 {
 		fmt.Fprintf(&sb, "\x1b[%dA", prevCursorRow)
 	}
-	sb.WriteString("\r\x1b[J")
+	sb.WriteString("\r")
+	if originCol > 0 {
+		fmt.Fprintf(&sb, "\x1b[%dC", originCol)
+	}
+	sb.WriteString("\x1b[J")
 
 	// Rewrite prompt + buffer. Embedded newlines become CR+LF followed by PS2;
 	// soft wraps are left to the terminal.

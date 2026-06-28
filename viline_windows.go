@@ -36,6 +36,18 @@ func stdoutHandle() syscall.Handle {
 	return syscall.Handle(h)
 }
 
+// cursorColumn returns the current cursor column (0-based) from the console, so
+// a prompt can be drawn at the cursor's actual column (e.g. after partial-line
+// output) rather than assuming column 0.
+func cursorColumn() int {
+	var info viConsoleScreenBufferInfo
+	r, _, _ := procGetConsoleScreenBufferInfo.Call(uintptr(stdoutHandle()), uintptr(unsafe.Pointer(&info)))
+	if r == 0 {
+		return 0
+	}
+	return int(info.cursorPos.x)
+}
+
 // terminalCols returns the console width in columns (visible window width),
 // falling back to 80 when it cannot be determined.
 func terminalCols() int {

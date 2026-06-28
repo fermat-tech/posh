@@ -3,6 +3,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 
 	"golang.org/x/sys/unix"
@@ -40,6 +41,57 @@ func terminalCols() int {
 		return 80
 	}
 	return int(ws.Col)
+}
+
+// cursorColumn queries the terminal for the current cursor column (0-based)
+// using the ANSI Device Status Report: ESC[6n makes the terminal reply
+// ESC[row;colR on stdin. Used once when a prompt starts, so the editor can draw
+// it at the cursor's actual column (after partial-line output) instead of
+// assuming column 0. Returns 0 if the terminal does not respond.
+func cursorColumn() int {
+	fmt.Fprint(os.Stdout, "\033[6n")
+	var buf [32]byte
+	n := 0
+	b := make([]byte, 1)
+	for n < len(buf) {
+		nr, err := os.Stdin.Read(b)
+		if err != nil || nr == 0 {
+			break
+		}
+		buf[n] = b[0]
+		n++
+		if b[0] == 'R' {
+			break
+		}
+	}
+	col := 0
+	inSeq := false
+	sawSemi := false
+	for i := 0; i < n; i++ {
+		c := buf[i]
+		if c == '[' {
+			inSeq = true
+			continue
+		}
+		if !inSeq {
+			continue
+		}
+		if c == ';' {
+			sawSemi = true
+			col = 0
+			continue
+		}
+		if c == 'R' {
+			break
+		}
+		if c >= '0' && c <= '9' && sawSemi {
+			col = col*10 + int(c-'0')
+		}
+	}
+	if col > 0 {
+		return col - 1 // 1-based to 0-based
+	}
+	return 0
 }
 
 // readKey reads one logical key event from stdin.
