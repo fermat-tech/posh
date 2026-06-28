@@ -1117,10 +1117,15 @@ func NeedsContinuation(input string) bool {
 		return true
 	}
 
-	// An unterminated quote is a lexer error; let the evaluator report it rather
-	// than prompting forever for more input.
 	l := lexer.New(input)
 	l.Tokenize()
+	// An unterminated multi-line construct (e.g. an array literal NAME=(... with
+	// no closing paren) needs more input.
+	if l.Incomplete {
+		return true
+	}
+	// An unterminated quote is a lexer error; let the evaluator report it rather
+	// than prompting forever for more input.
 	if len(l.Errors) > 0 {
 		return false
 	}

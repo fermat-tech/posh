@@ -191,6 +191,8 @@ func TestNeedsContinuation(t *testing.T) {
 		"{ echo hi",
 		"(a; b",
 		"cat << EOF\nbody",
+		"name=(Grouch",         // unterminated array literal
+		"name=(\n  a\n  b",     // array literal still open across lines
 	}
 	for _, s := range cont {
 		if !NeedsContinuation(s) {
@@ -203,6 +205,8 @@ func TestNeedsContinuation(t *testing.T) {
 		"for x in a; do echo $x; done",
 		"cat << EOF\nbody\nEOF",
 		"(a; b)",
+		"name=(a b c)",            // terminated array literal
+		"name=(\n  a\n  b\n)",     // multi-line array literal, closed
 		// Keywords used as ordinary words must NOT be treated as open blocks.
 		"echo this is a multiline string for testing",
 		"echo for testing",

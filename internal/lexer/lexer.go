@@ -125,10 +125,11 @@ type Token struct {
 
 // Lexer holds the tokenizer state.
 type Lexer struct {
-	input  []rune
-	pos    int
-	line   int      // current 1-based line number
-	Errors []string // unterminated-string diagnostics
+	input      []rune
+	pos        int
+	line       int      // current 1-based line number
+	Errors     []string // unterminated-string diagnostics
+	Incomplete bool     // input ended mid-construct (e.g. an unterminated array literal)
 }
 
 // New creates a Lexer for the given input string.
@@ -505,10 +506,14 @@ func (l *Lexer) readArrayLiteral() string {
 			l.advance()
 		}
 		ch, ok := l.peek()
-		if !ok || ch == ')' {
-			if ok {
-				l.advance()
-			}
+		if !ok {
+			// Reached end of input before the closing ')': the array literal is
+			// unterminated, so the caller needs more input to complete it.
+			l.Incomplete = true
+			break
+		}
+		if ch == ')' {
+			l.advance()
 			break
 		}
 		elem := l.readWord()
