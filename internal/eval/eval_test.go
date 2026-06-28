@@ -52,6 +52,18 @@ func TestForLoop(t *testing.T) {
 	}
 }
 
+func TestForBraceBody(t *testing.T) {
+	// bash brace-body form: { } stands in for do/done.
+	if got := eval(t, `for x in a b c; { printf '%s.' "$x"; }`); got != "a.b.c." {
+		t.Fatalf("for brace body = %q", got)
+	}
+	// Quoted array iteration with a brace body preserves elements with spaces.
+	got := eval(t, `arr=(a "b c" d); for x in "${arr[@]}"; { echo "[$x]"; }`)
+	if got != "[a]\n[b c]\n[d]" {
+		t.Fatalf("brace body over array = %q", got)
+	}
+}
+
 func TestWhileLoop(t *testing.T) {
 	src := `i=0; while [ $i -lt 3 ]; do printf '%s' "$i"; i=$((i + 1)); done`
 	if got := eval(t, src); got != "012" {

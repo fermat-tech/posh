@@ -111,6 +111,7 @@ Posh implements the standard compound commands:
 
 	if COND; then LIST; elif COND; then LIST; else LIST; fi
 	for NAME in WORDS; do LIST; done
+	for NAME in WORDS; { LIST; }   bash brace-body form ({ } replace do/done)
 	while COND; do LIST; done
 	until COND; do LIST; done
 	case WORD in PATTERN) LIST;; esac

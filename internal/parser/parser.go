@@ -507,10 +507,42 @@ func (p *Parser) parseForCmd() (*ForCmd, error) {
 		}
 	}
 
-	if err := p.consumeWord("do"); err != nil {
+	body, err := p.parseForBody()
+	if err != nil {
 		return nil, err
 	}
 
+	cmd.Body = body
+	cmd.Redirs = p.parseRedirs()
+	return cmd, nil
+}
+
+// parseForBody parses a for-loop body in either the POSIX form `do LIST done` or
+// the brace form `{ LIST }` — a bash extension where { and } stand in for do and
+// done. (bash allows the brace body only on for loops, and requires a separator
+// before the {, which the caller's word collection has already consumed.)
+func (p *Parser) parseForBody() (*List, error) {
+	if p.peek().Type == lexer.LBRACE {
+		p.consumeNonNL() // consume '{'
+		body, err := p.parseList()
+		if err != nil {
+			return nil, err
+		}
+		p.skipNewlines()
+		t := p.peek()
+		if t.Type == lexer.EOF {
+			return nil, ErrIncomplete
+		}
+		if t.Type != lexer.RBRACE {
+			return nil, &ParseError{fmt.Sprintf("expected '}', got %q", t.Val)}
+		}
+		p.consumeNonNL()
+		return toList(body), nil
+	}
+
+	if err := p.consumeWord("do"); err != nil {
+		return nil, err
+	}
 	old := p.pushStops("done")
 	body, err := p.parseList()
 	p.popStops(old)
@@ -520,10 +552,7 @@ func (p *Parser) parseForCmd() (*ForCmd, error) {
 	if err := p.consumeWord("done"); err != nil {
 		return nil, err
 	}
-
-	cmd.Body = toList(body)
-	cmd.Redirs = p.parseRedirs()
-	return cmd, nil
+	return toList(body), nil
 }
 
 func (p *Parser) parseWhileCmd(until bool) (*WhileCmd, error) {

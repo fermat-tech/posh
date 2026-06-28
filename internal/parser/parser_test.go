@@ -115,6 +115,27 @@ func TestParseFor(t *testing.T) {
 	}
 }
 
+func TestParseForBraceBody(t *testing.T) {
+	// for ... ; { ... } is a bash extension where { } replaces do/done.
+	forc, ok := first(t, "for x in a b c; { echo $x; }").(*ForCmd)
+	if !ok {
+		t.Fatalf("brace-body for did not parse to *ForCmd")
+	}
+	if forc.Var != "x" || len(forc.Words) != 3 {
+		t.Fatalf("got var=%q words=%v", forc.Var, forc.Words)
+	}
+	if forc.Body == nil {
+		t.Fatalf("brace-body for has no body")
+	}
+}
+
+func TestParseForBraceBodyIncomplete(t *testing.T) {
+	// An unterminated brace body should report incomplete (so the REPL keeps reading).
+	if _, err := Parse("for x in a b; {"); err != ErrIncomplete {
+		t.Fatalf("want ErrIncomplete for open brace body, got %v", err)
+	}
+}
+
 func TestParseWhileUntil(t *testing.T) {
 	if first(t, "while true; do echo x; done").(*WhileCmd).Until {
 		t.Fatalf("while parsed as until")
