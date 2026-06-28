@@ -158,6 +158,45 @@ func (sh *Shell) SetPosParams(params []string) {
 	sh.posParams = params
 }
 
+// inlineEnv applies command-prefix assignments (e.g. `TZ= date`) on top of base,
+// returning the environment for the child process. Each assignment OVERRIDES any
+// existing entry for the same name rather than appending a duplicate — otherwise
+// the child's getenv would resolve to the original value and ignore the prefix.
+// Only scalar VAR=val and VAR+=val forms are exported; array assignments are
+// skipped (a process environment has no array values).
+func (sh *Shell) inlineEnv(base, assigns []string) []string {
+	if len(assigns) == 0 {
+		return base
+	}
+	env := append([]string(nil), base...)
+	pos := make(map[string]int, len(env))
+	for i, kv := range env {
+		if eq := strings.IndexByte(kv, '='); eq > 0 {
+			pos[kv[:eq]] = i
+		}
+	}
+	for _, a := range assigns {
+		ap, ok := parseAssignParts(a)
+		if !ok || ap.hasSub || isArrayLiteral(ap.value) {
+			continue
+		}
+		val := unprotectWord(sh.expandWord(ap.value))
+		if ap.append {
+			if i, ok := pos[ap.name]; ok {
+				val = env[i][len(ap.name)+1:] + val
+			}
+		}
+		entry := ap.name + "=" + val
+		if i, ok := pos[ap.name]; ok {
+			env[i] = entry
+		} else {
+			pos[ap.name] = len(env)
+			env = append(env, entry)
+		}
+	}
+	return env
+}
+
 func (sh *Shell) exportedEnv() []string {
 	var env []string
 	for k, v := range sh.vars {
@@ -645,17 +684,9 @@ func (sh *Shell) evalSimpleCmd(cmd *parser.SimpleCmd, stdin io.Reader, stdout, s
 		return 0
 	}
 
-	// Build inline environment
-	cmdEnv := sh.exportedEnv()
-	for _, a := range cmd.Assigns {
-		idx := strings.IndexByte(a, '=')
-		if idx < 0 {
-			continue
-		}
-		key := a[:idx]
-		val := sh.expandWord(a[idx+1:])
-		cmdEnv = append(cmdEnv, key+"="+val)
-	}
+	// Build the inline environment from the exported variables plus the
+	// command-prefix assignments.
+	cmdEnv := sh.inlineEnv(sh.exportedEnv(), cmd.Assigns)
 
 	name := words[0]
 
