@@ -205,6 +205,22 @@ func readKey() (keyEvent, error) {
 		if ch == 0x13 {
 			return keyEvent{typ: keyCtrlS}, nil
 		}
+		// Emacs movement / history / yank
+		if ch == 0x02 {
+			return keyEvent{typ: keyCtrlB}, nil
+		}
+		if ch == 0x06 {
+			return keyEvent{typ: keyCtrlF}, nil
+		}
+		if ch == 0x0e {
+			return keyEvent{typ: keyCtrlN}, nil
+		}
+		if ch == 0x10 {
+			return keyEvent{typ: keyCtrlP}, nil
+		}
+		if ch == 0x19 {
+			return keyEvent{typ: keyCtrlY}, nil
+		}
 		// Multi-byte UTF-8 (accented chars, emoji, etc.)
 		if ch >= 0x80 {
 			r, err := readUTF8Rune(ch)

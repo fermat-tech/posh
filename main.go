@@ -3,7 +3,6 @@ package main
 import (
 	"bufio"
 	"fmt"
-	"io"
 	"net"
 	"os"
 	"os/signal"
@@ -15,7 +14,6 @@ import (
 	"github.com/fermat-tech/posh/internal/parser"
 	"github.com/mattn/go-colorable"
 	"github.com/mattn/go-isatty"
-	"github.com/peterh/liner"
 )
 
 var progName string
@@ -105,38 +103,11 @@ func runREPL(sh *eval.Shell) {
 
 	c := &poshCompleter{sh: sh}
 
-	// openLiner / closeLiner manage a single liner instance.
-	// liner and the vi raw-mode editor must never be open at the same time.
-	var rl *liner.State
-
-	openLiner := func() {
-		if rl != nil {
-			return
-		}
-		rl = liner.NewLiner()
-		rl.SetCtrlCAborts(true)
-		for _, h := range sh.History {
-			rl.AppendHistory(h)
-		}
-		rl.SetWordCompleter(c.Complete)
-	}
-
-	closeLiner := func() {
-		if rl == nil {
-			return
-		}
-		rl.Close()
-		rl = nil
-	}
-
-	defer closeLiner()
-	// Persist history from sh.History, which both the emacs (liner) and vi
-	// editors append to. Saving here rather than via liner's WriteHistory means
-	// history is written in every mode and on every exit path (Ctrl+D, exit, or
-	// EOF) — the deferred call runs during the exit panic's unwinding too.
+	// Persist history on every exit path (Ctrl+D, EOF, or the exit builtin, whose
+	// panic unwinds through this defer).
 	defer saveHistory(histFile, sh)
 
-	// Pre-load history from file into sh.History so the vi editor can use it.
+	// Pre-load history from file into sh.History.
 	if f, err := os.Open(histFile); err == nil {
 		sc := bufio.NewScanner(f)
 		for sc.Scan() {
@@ -147,28 +118,17 @@ func runREPL(sh *eval.Shell) {
 		f.Close()
 	}
 
-	// Open liner now only if not starting in vi mode.
-	if !sh.GetOpt("vi") {
-		openLiner()
-	}
-
 	for {
-		var input string
-		var err error
+		// Both editing modes use the same editor; emacs mode is simply vi mode
+		// turned off (insert-only, with emacs keybindings).
+		emacs := !sh.GetOpt("vi")
+		input, err := viReadMultiLine(sh, c.Complete, emacs)
 
-		if sh.GetOpt("vi") {
-			closeLiner() // release terminal if we just switched from emacs
-			input, err = viReadMultiLine(sh, c.Complete)
-		} else {
-			openLiner() // acquire terminal if we just switched from vi
-			input, err = linerReadMultiLine(rl, sh)
-		}
-
-		if isViInterrupt(err) || err == liner.ErrPromptAborted {
+		if isViInterrupt(err) {
 			fmt.Fprintln(sh.Stderr)
 			continue
 		}
-		if isViEOF(err) || err == io.EOF {
+		if isViEOF(err) {
 			fmt.Fprintln(sh.Stdout)
 			break
 		}
@@ -176,9 +136,6 @@ func runREPL(sh *eval.Shell) {
 		input = strings.TrimSpace(input)
 		if input == "" {
 			continue
-		}
-		if rl != nil {
-			rl.AppendHistory(input)
 		}
 		sh.History = append(sh.History, input)
 		sh.EvalString(input)
@@ -210,35 +167,13 @@ func saveHistory(path string, sh *eval.Shell) {
 	w.Flush()
 }
 
-// linerReadMultiLine reads one complete command using liner (emacs mode).
-func linerReadMultiLine(rl *liner.State, sh *eval.Shell) (string, error) {
-	var lines []string
-	for {
-		prompt := buildPrompt(sh)
-		if len(lines) > 0 {
-			prompt = "> "
-		}
-		line, err := rl.Prompt(prompt)
-		if err != nil {
-			if len(lines) == 0 {
-				return "", err
-			}
-			return strings.Join(lines, "\n"), err
-		}
-		lines = append(lines, line)
-		full := strings.Join(lines, "\n")
-		if !parser.NeedsContinuation(full) {
-			return full, nil
-		}
-	}
-}
-
-// viReadMultiLine reads one complete command using the vi-mode editor. The
+// viReadMultiLine reads one complete command using posh's line editor. The
 // editor manages the whole (possibly multi-line) command as a single buffer:
 // when Enter is pressed while the command is incomplete, it inserts a newline
-// and keeps editing, so vi motions work across the entire command.
-func viReadMultiLine(sh *eval.Shell, completer completeFn) (string, error) {
-	return viReadLine(buildPrompt(sh), "> ", sh.History, completer, parser.NeedsContinuation)
+// and keeps editing. emacs selects emacs-style key bindings (insert-only with
+// Ctrl-key editing); otherwise it is the modal vi editor.
+func viReadMultiLine(sh *eval.Shell, completer completeFn, emacs bool) (string, error) {
+	return viReadLine(buildPrompt(sh), "> ", sh.History, completer, parser.NeedsContinuation, emacs)
 }
 
 func runNonInteractive(sh *eval.Shell) {

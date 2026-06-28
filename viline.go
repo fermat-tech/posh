@@ -37,6 +37,11 @@ const (
 	keyCtrlK
 	keyCtrlR
 	keyCtrlS
+	keyCtrlB
+	keyCtrlF
+	keyCtrlN
+	keyCtrlP
+	keyCtrlY
 	keyEOF
 	keyInterrupt
 	keyTab
@@ -108,6 +113,10 @@ type viState struct {
 	searchOrig     []rune  // buffer to restore if the search is cancelled
 	searchPrevMode viModeT // editor mode to return to when the search ends
 
+	// emacs selects emacs-style editing: the editor stays in insert mode (Esc is
+	// inert) and the Ctrl-key bindings below are active.
+	emacs bool
+
 	// Multi-line editing. The buffer is a single logical command that may contain
 	// embedded newlines (added when Enter is pressed while the command is
 	// incomplete). prompt is PS1 for the first row; prompt2 (PS2) prefixes each
@@ -133,7 +142,7 @@ type viState struct {
 // prefixed by prompt2 (PS2). All vi motions operate over the whole buffer, so
 // the cursor can move across the embedded newlines.
 // consoleRawMode and readKey are implemented per platform.
-func viReadLine(prompt, prompt2 string, history []string, completer completeFn, continueFn func(string) bool) (string, error) {
+func viReadLine(prompt, prompt2 string, history []string, completer completeFn, continueFn func(string) bool, emacs bool) (string, error) {
 	restore, err := consoleRawMode()
 	if err != nil {
 		// fallback: plain input
@@ -150,6 +159,7 @@ func viReadLine(prompt, prompt2 string, history []string, completer completeFn, 
 		history:    append([]string(nil), history...),
 		histIdx:    len(history),
 		mode:       viInsert,
+		emacs:      emacs,
 		completer:  completer,
 		continueFn: continueFn,
 		// Draw the prompt at the cursor's current column so partial-line output
@@ -225,9 +235,30 @@ func (vs *viState) handleInsert(key keyEvent) (done bool, line string, err error
 		vs.pos = 0
 		return true, "", errInterrupt
 	case keyEscape:
+		if vs.emacs {
+			break // emacs mode has no command mode; Esc is inert
+		}
 		vs.mode = viNormal
 		if vs.pos > 0 {
 			vs.pos--
+		}
+	case keyCtrlB:
+		if vs.pos > 0 {
+			vs.pos--
+		}
+	case keyCtrlF:
+		if vs.pos < len(vs.buf) {
+			vs.pos++
+		}
+	case keyCtrlP:
+		vs.historyUp()
+	case keyCtrlN:
+		vs.historyDown()
+	case keyCtrlY:
+		if len(vs.yank) > 0 {
+			vs.saveUndo()
+			vs.buf = append(vs.buf[:vs.pos], append(append([]rune(nil), vs.yank...), vs.buf[vs.pos:]...)...)
+			vs.pos += len(vs.yank)
 		}
 	case keyBackspace:
 		if vs.pos > 0 {

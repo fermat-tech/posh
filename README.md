@@ -202,17 +202,24 @@ PS1='\u@\h \w \$ '
 
 ## Line editing (interactive mode)
 
+posh has a built-in line editor with two modes: **emacs** (default) and **vi**
+(`set -o vi`). Common keys in both:
+
 | Key | Action |
 |-----|--------|
 | Up / Down | Navigate history |
-| Ctrl+R | Incremental reverse history search |
+| Ctrl+R / Ctrl+S | Incremental reverse / forward history search |
 | Ctrl+C | Interrupt (return to prompt) |
 | Ctrl+D | Exit on empty line |
 | Tab | Filename completion |
 
-In **vi mode** (`set -o vi`), history search is also available from command mode:
-`/pattern` searches toward older commands, `?pattern` toward newer, and `n` / `N`
-repeat the search in the same / opposite direction.
+**Emacs mode** adds `Ctrl+A`/`Ctrl+E` (line start/end), `Ctrl+B`/`Ctrl+F`
+(back/forward), `Ctrl+P`/`Ctrl+N` (history), `Ctrl+U`/`Ctrl+K` (kill to
+start/end), `Ctrl+W` (kill word), and `Ctrl+Y` (yank).
+
+**Vi mode** adds modal editing (Esc for command mode) with the usual motions, and
+history search from command mode: `/pattern` (older), `?pattern` (newer), and
+`n` / `N` to repeat in the same / opposite direction.
 
 History is saved to `~/.posh_history` (max 1000 entries).
 

@@ -185,12 +185,20 @@ contains a path separator is run directly.
 
 # Line editing
 
-The interactive editor offers an emacs mode (the default, via the liner library)
-and a vi mode selected with "set -o vi". History is saved to ~/.posh_history.
-Common keys include Up/Down to navigate history, Ctrl+R for reverse search, Tab
-to complete the word under the cursor, Ctrl+C to interrupt, and Ctrl+D to exit
-on an empty line. In vi mode, ESC enters command mode for vi-style motions and
-history navigation, and Tab still completes.
+The interactive editor offers an emacs mode (the default) and a vi mode selected
+with "set -o vi"; both are provided by the same built-in editor. History is saved
+to ~/.posh_history. Common keys include Up/Down to navigate history, Tab to
+complete the word under the cursor, Ctrl+C to interrupt, and Ctrl+D to exit on an
+empty line.
+
+Emacs mode adds Ctrl+A/E (line start/end), Ctrl+B/F (back/forward char),
+Ctrl+P/N (previous/next history), Ctrl+U/K (kill to start/end), Ctrl+W (kill
+word), Ctrl+Y (yank), and Ctrl+R / Ctrl+S for incremental reverse / forward
+history search.
+
+In vi mode, ESC enters command mode for vi-style motions and history navigation;
+"/pattern" and "?pattern" search the history (older / newer) with n / N to repeat,
+and Ctrl+R / Ctrl+S also work. Tab still completes in either mode.
 
 # Prompt
 
