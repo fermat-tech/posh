@@ -416,30 +416,98 @@ func (sh *Shell) expandBrace(runes []rune, i int) (string, int) {
 		}
 	}
 
-	// ${VAR:-default}
-	if idx := strings.Index(inner, ":-"); idx >= 0 {
-		name := inner[:idx]
-		def := inner[idx+2:]
-		val := sh.getVar(name)
-		if val == "" {
-			return sh.expandWord(def), consumed
-		}
-		return val, consumed
-	}
-	// ${VAR:+alt}
-	if idx := strings.Index(inner, ":+"); idx >= 0 {
-		name := inner[:idx]
-		alt := inner[idx+2:]
-		if sh.getVar(name) != "" {
-			return sh.expandWord(alt), consumed
-		}
-		return "", consumed
-	}
-	// ${#VAR}
+	// ${#VAR} — length in characters.
 	if strings.HasPrefix(inner, "#") {
-		return strconv.Itoa(len(sh.getVar(inner[1:]))), consumed
+		return strconv.Itoa(len([]rune(sh.getVar(inner[1:])))), consumed
 	}
-	return sh.getVar(inner), consumed
+
+	// Split a leading identifier name from any operator that follows.
+	name, op := splitParamName(inner)
+	if op == "" {
+		return sh.getVar(name), consumed
+	}
+
+	// Colon operators: the character right after ':' selects the form. -, +, =, ?
+	// are the (alternate/default/assign/error) forms; anything else (a digit, a
+	// space, '(') begins a substring offset, e.g. ${v:6:5} or ${v: -5}.
+	if strings.HasPrefix(op, ":") {
+		after := op[1:]
+		switch {
+		case strings.HasPrefix(after, "-"): // ${VAR:-default}
+			if v := sh.getVar(name); v != "" {
+				return v, consumed
+			}
+			return sh.expandWord(after[1:]), consumed
+		case strings.HasPrefix(after, "+"): // ${VAR:+alt}
+			if sh.getVar(name) != "" {
+				return sh.expandWord(after[1:]), consumed
+			}
+			return "", consumed
+		case strings.HasPrefix(after, "="): // ${VAR:=default} (assign if unset)
+			v := sh.getVar(name)
+			if v == "" {
+				v = sh.expandWord(after[1:])
+				sh.setVar(name, v)
+			}
+			return v, consumed
+		default: // ${VAR:offset} / ${VAR:offset:length}
+			return sh.substringExpand(name, after), consumed
+		}
+	}
+
+	// Other operators (#pat, %pat, /pat/repl, ...) aren't supported yet.
+	return sh.getVar(name), consumed
+}
+
+// splitParamName splits a ${...} body into a leading variable name (letters,
+// digits, underscore) and the remaining operator text.
+func splitParamName(inner string) (name, op string) {
+	for k, r := range inner {
+		if !(unicode.IsLetter(r) || unicode.IsDigit(r) || r == '_') {
+			return inner[:k], inner[k:]
+		}
+	}
+	return inner, ""
+}
+
+// substringExpand implements ${var:offset} and ${var:offset:length} with bash
+// semantics: 0-based offset, negative offset counts from the end, negative
+// length leaves that many characters off the end. offset and length are
+// arithmetic expressions.
+func (sh *Shell) substringExpand(name, spec string) string {
+	s := []rune(sh.getVar(name))
+	offStr, lenStr := spec, ""
+	if c := strings.IndexByte(spec, ':'); c >= 0 {
+		offStr, lenStr = spec[:c], spec[c+1:]
+	}
+
+	offset := int(evalArith(sh, strings.TrimSpace(offStr)))
+	if offset < 0 {
+		offset += len(s)
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	if offset > len(s) {
+		offset = len(s)
+	}
+
+	end := len(s)
+	if strings.TrimSpace(lenStr) != "" {
+		length := int(evalArith(sh, strings.TrimSpace(lenStr)))
+		if length < 0 {
+			end = len(s) + length // negative: trim from the end
+		} else {
+			end = offset + length
+		}
+	}
+	if end < offset {
+		end = offset
+	}
+	if end > len(s) {
+		end = len(s)
+	}
+	return string(s[offset:end])
 }
 
 // expandCmdSub runs $(...) and returns its trimmed stdout.

@@ -83,6 +83,19 @@ echo $?               # last exit code
 echo $$               # current PID
 ```
 
+### Parameter expansion
+```sh
+text="Hello World"
+echo "${text:6:5}"        # World   (substring: offset 6, length 5)
+echo "${text:6}"          # World   (to end)
+echo "${text: -5}"        # World   (negative offset, counts from end)
+echo "${text:0:-6}"       # Hello   (negative length, trims from end)
+echo "${#text}"           # 11      (length in characters)
+echo "${UNSET:-default}"  # default (value if unset/empty)
+echo "${NAME:+set}"       # set     (alternate value if set)
+echo "${V:=init}"         # init    (assign default if unset)
+```
+
 ### Arrays
 ```sh
 # indexed

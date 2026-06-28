@@ -69,6 +69,9 @@ arithmetic substitution, then word splitting and pathname (glob) expansion.
 
 	echo Hello $NAME              Parameter expansion.
 	echo "Hello ${NAME}"          Braced parameter expansion.
+	echo "${NAME:-default}"       Default / :+ alternate / := assign-if-unset.
+	echo "${#NAME}"               Length in characters.
+	echo "${NAME:6:5}"            Substring (offset:length; negative counts back).
 	echo $?                       Exit status of the last command.
 	echo $$                       Shell process id.
 	echo "Today is $(date)"       Command substitution.
