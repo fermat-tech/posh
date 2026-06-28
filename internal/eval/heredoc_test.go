@@ -9,6 +9,18 @@ func TestHeredocExpanding(t *testing.T) {
 	}
 }
 
+func TestHeredocIntoPipeline(t *testing.T) {
+	// The heredoc feeds the first stage; its output must reach the next command.
+	src := "cat << EOF | cat\nThis is a *\ntest\nbye\nEOF"
+	if got := eval(t, src); got != "This is a *\ntest\nbye" {
+		t.Fatalf("heredoc | cat = %q", got)
+	}
+	// Heredoc piped into a counting command.
+	if got := eval(t, "cat << EOF | wc -l\na\nb\nc\nEOF"); got != "3" {
+		t.Fatalf("heredoc | wc -l = %q", got)
+	}
+}
+
 func TestHeredocQuotedDelimiterIsLiteral(t *testing.T) {
 	src := "NAME=posh\ncat << 'EOF'\nhello $NAME\nEOF"
 	if got := eval(t, src); got != "hello $NAME" {

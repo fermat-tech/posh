@@ -921,7 +921,8 @@ type heredocSpec struct {
 	delim      string
 	expand     bool // true = unquoted delimiter: body expands $VAR etc.
 	strip      bool // true for <<-
-	cmdLineIdx int  // index into outLines to inject body marker
+	cmdLineIdx int  // index into outLines whose command line holds this heredoc
+	insertPos  int  // rune offset just past the delimiter where the body marker goes
 }
 
 // preprocessHeredocs scans a multiline input string for heredoc operators,
@@ -934,9 +935,15 @@ func preprocessHeredocs(input string) string {
 	}
 	lines := strings.Split(input, "\n")
 
+	// One pending body marker to splice into a command line, at insertPos.
+	type insertion struct {
+		pos    int
+		marker string
+	}
 	var outLines []string
 	var pending []heredocSpec
 	var pendingBodies [][]string
+	insertions := map[int][]insertion{} // by command-line index
 
 	for _, line := range lines {
 		if len(pending) > 0 {
@@ -946,7 +953,9 @@ func preprocessHeredocs(input string) string {
 				checkLine = strings.TrimLeft(line, "\t")
 			}
 			if checkLine == s.delim {
-				// Terminator found: inject body into the command line.
+				// Terminator found: record the body marker to splice in just past
+				// the delimiter (so a following "| cmd" or redirection is not
+				// separated from its command).
 				body := strings.Join(pendingBodies[0], "\n")
 				if len(pendingBodies[0]) > 0 {
 					body += "\n"
@@ -955,7 +964,10 @@ func preprocessHeredocs(input string) string {
 				if !s.expand {
 					marker = '\x03' // literal
 				}
-				outLines[s.cmdLineIdx] += " " + string(marker) + body + "\x02"
+				insertions[s.cmdLineIdx] = append(insertions[s.cmdLineIdx], insertion{
+					pos:    s.insertPos,
+					marker: " " + string(marker) + body + "\x02",
+				})
 				pending = pending[1:]
 				pendingBodies = pendingBodies[1:]
 			} else {
@@ -974,6 +986,21 @@ func preprocessHeredocs(input string) string {
 				pendingBodies = append(pendingBodies, nil)
 			}
 		}
+	}
+
+	// Splice the collected markers into their command lines. Insertions for a
+	// line were recorded left-to-right (ascending pos), so apply them in reverse
+	// (rightmost first) to keep the earlier offsets valid.
+	for idx, ins := range insertions {
+		runes := []rune(outLines[idx])
+		for k := len(ins) - 1; k >= 0; k-- {
+			p := ins[k].pos
+			if p > len(runes) {
+				p = len(runes)
+			}
+			runes = append(runes[:p:p], append([]rune(ins[k].marker), runes[p:]...)...)
+		}
+		outLines[idx] = string(runes)
 	}
 
 	return strings.Join(outLines, "\n")
@@ -1056,6 +1083,7 @@ func scanLineForHeredocs(line string, cmdLineIdx int) []heredocSpec {
 					expand:     expand,
 					strip:      strip,
 					cmdLineIdx: cmdLineIdx,
+					insertPos:  j, // just past the delimiter (before any "| cmd", redirs, etc.)
 				})
 			}
 			i = j - 1
