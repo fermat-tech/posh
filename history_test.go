@@ -2,6 +2,8 @@ package main
 
 import (
 	"bufio"
+	"bytes"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -9,6 +11,24 @@ import (
 
 	"github.com/fermat-tech/posh/internal/eval"
 )
+
+func TestNewlineTracker(t *testing.T) {
+	var buf bytes.Buffer
+	tr := &newlineTracker{w: &buf, atLineStart: true}
+
+	io.WriteString(tr, "1 2 3 ") // partial line, no trailing newline
+	if tr.atLineStart {
+		t.Fatalf("atLineStart should be false after partial-line output")
+	}
+	io.WriteString(tr, "done\n") // ends with newline
+	if !tr.atLineStart {
+		t.Fatalf("atLineStart should be true after newline-terminated output")
+	}
+	// All bytes pass through unchanged.
+	if buf.String() != "1 2 3 done\n" {
+		t.Fatalf("tracker altered output: %q", buf.String())
+	}
+}
 
 func TestSaveHistoryWritesAllEntries(t *testing.T) {
 	sh := eval.New("posh")

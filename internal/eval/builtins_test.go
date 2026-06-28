@@ -28,6 +28,37 @@ func TestPrintf(t *testing.T) {
 	}
 }
 
+func TestPrintfReusesFormat(t *testing.T) {
+	// The format string is reused until all arguments are consumed.
+	if got := shellPrintfFormat("%s ", []string{"1", "2", "3"}); got != "1 2 3 " {
+		t.Fatalf("recycle = %q, want %q", got, "1 2 3 ")
+	}
+	if got := shellPrintfFormat("%s\n", []string{"a", "b", "c"}); got != "a\nb\nc\n" {
+		t.Fatalf("recycle with newline = %q", got)
+	}
+	// Two conversions per pass.
+	if got := shellPrintfFormat("%s=%s ", []string{"a", "1", "b", "2"}); got != "a=1 b=2 " {
+		t.Fatalf("two-per-pass = %q", got)
+	}
+}
+
+func TestPrintfNoConversionAppliedOnce(t *testing.T) {
+	// A format with no conversions is emitted exactly once; extra args ignored.
+	if got := shellPrintfFormat("x", []string{"a", "b"}); got != "x" {
+		t.Fatalf("no-conversion = %q, want %q", got, "x")
+	}
+}
+
+func TestPrintfIsFaithful(t *testing.T) {
+	// No trailing newline is added unless the format specifies one.
+	if got := shellPrintfFormat("hi", nil); got != "hi" {
+		t.Fatalf("faithful = %q, want %q", got, "hi")
+	}
+	if got := shellPrintfFormat("%d%% ", []string{"50", "75"}); got != "50% 75% " {
+		t.Fatalf("percent literal = %q", got)
+	}
+}
+
 func TestExportEnvAndUnset(t *testing.T) {
 	if got := eval(t, `export FOO=bar; env | grep '^FOO='`); got != "FOO=bar" {
 		t.Fatalf("export/env = %q", got)

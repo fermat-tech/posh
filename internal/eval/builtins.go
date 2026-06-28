@@ -176,10 +176,29 @@ func builtinPrintf(_ *Shell, args []string, _ io.Reader, stdout, stderr io.Write
 
 // shellPrintfFormat implements shell-compatible printf formatting.
 // Handles %s %d %i %f %b %% and backslash escapes \n \t \r \\ \a \b \v \0NNN.
+// Like bash, the format string is reused until all arguments are consumed: e.g.
+// `printf '%s ' a b c` yields "a b c ". A format with no conversions is applied
+// exactly once.
 func shellPrintfFormat(format string, args []string) string {
 	var sb strings.Builder
 	runes := []rune(unescapeShellString(format))
+
 	argIdx := 0
+	for {
+		start := argIdx
+		argIdx = printfPass(&sb, runes, args, argIdx)
+		// Reuse the format only while arguments remain AND the last pass actually
+		// consumed some (a conversion-free format consumes none — apply it once).
+		if argIdx >= len(args) || argIdx == start {
+			break
+		}
+	}
+	return sb.String()
+}
+
+// printfPass applies the format runes once, consuming arguments starting at
+// argIdx, and returns the updated argument index.
+func printfPass(sb *strings.Builder, runes []rune, args []string, argIdx int) int {
 	i := 0
 	for i < len(runes) {
 		ch := runes[i]
@@ -195,6 +214,10 @@ func shellPrintfFormat(format string, args []string) string {
 		}
 		spec := runes[i]
 		i++
+		if spec == '%' {
+			sb.WriteByte('%') // %% consumes no argument
+			continue
+		}
 		var arg string
 		if argIdx < len(args) {
 			arg = args[argIdx]
@@ -205,22 +228,19 @@ func shellPrintfFormat(format string, args []string) string {
 			sb.WriteString(arg)
 		case 'd', 'i':
 			n, _ := strconv.ParseInt(strings.TrimSpace(arg), 0, 64)
-			fmt.Fprintf(&sb, "%d", n)
+			fmt.Fprintf(sb, "%d", n)
 		case 'f':
 			f, _ := strconv.ParseFloat(strings.TrimSpace(arg), 64)
-			fmt.Fprintf(&sb, "%f", f)
+			fmt.Fprintf(sb, "%f", f)
 		case 'b':
 			// %b: like %s but also processes backslash escapes in the argument
 			sb.WriteString(unescapeShellString(arg))
-		case '%':
-			sb.WriteByte('%')
-			argIdx-- // %% consumes no argument
 		default:
 			sb.WriteByte('%')
 			sb.WriteRune(spec)
 		}
 	}
-	return sb.String()
+	return argIdx
 }
 
 // unescapeShellString processes backslash escape sequences in a string.

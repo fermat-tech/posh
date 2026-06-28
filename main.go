@@ -103,6 +103,13 @@ func runREPL(sh *eval.Shell) {
 		return
 	}
 
+	// Track whether command output ended on a partial line (no trailing newline,
+	// e.g. printf "%s "). This does not alter any output — it only lets the REPL
+	// move to a fresh line before drawing the next prompt so partial-line output
+	// isn't overwritten by the prompt's redraw.
+	out := &newlineTracker{w: sh.Stdout, atLineStart: true}
+	sh.Stdout = out
+
 	c := &poshCompleter{sh: sh}
 
 	// openLiner / closeLiner manage a single liner instance.
@@ -153,6 +160,12 @@ func runREPL(sh *eval.Shell) {
 	}
 
 	for {
+		// If the previous command left output on a partial line (no trailing
+		// newline), move to a fresh line so the prompt doesn't overwrite it.
+		if !out.atLineStart {
+			io.WriteString(out, "\n")
+		}
+
 		var input string
 		var err error
 
@@ -184,6 +197,24 @@ func runREPL(sh *eval.Shell) {
 		sh.EvalString(input)
 		os.Stdout.Sync()
 	}
+}
+
+// newlineTracker wraps a writer and records whether the most recently written
+// byte was a newline. It passes all bytes through unchanged; the REPL uses
+// atLineStart to decide whether to emit a separating newline before the prompt
+// so that partial-line command output (e.g. printf without a trailing newline)
+// is not overwritten.
+type newlineTracker struct {
+	w           io.Writer
+	atLineStart bool
+}
+
+func (t *newlineTracker) Write(p []byte) (int, error) {
+	n, err := t.w.Write(p)
+	if n > 0 {
+		t.atLineStart = p[n-1] == '\n'
+	}
+	return n, err
 }
 
 // maxHistory caps how many of the most recent entries are written to the
