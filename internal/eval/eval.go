@@ -369,10 +369,27 @@ func (sh *Shell) evalPipeline(pipe *parser.Pipeline) int {
 	}
 
 	n := len(pipe.Cmds)
-	pipes := make([]*io.PipeReader, n-1)
-	pipeW := make([]*io.PipeWriter, n-1)
+	// Use real OS pipes (not io.Pipe) to connect stages. When a stage runs an
+	// external command, the child inherits the pipe's *os.File directly as a real
+	// fd and reads it on demand. With an in-memory io.Pipe, Go's exec would
+	// instead spawn a goroutine that eagerly copies the reader into the child,
+	// draining lines that the child never consumes — which broke loops like
+	// `ls | while read e; do some_external_cmd; done` (the loop ended after one
+	// iteration because the inner command's copier had swallowed the rest).
+	pipes := make([]*os.File, n-1)
+	pipeW := make([]*os.File, n-1)
 	for i := range pipes {
-		pipes[i], pipeW[i] = io.Pipe()
+		r, w, err := os.Pipe()
+		if err != nil {
+			fmt.Fprintf(sh.Stderr, "%s: pipe: %v\n", sh.name, err)
+			// Close any pipes already created before bailing out.
+			for j := 0; j < i; j++ {
+				pipes[j].Close()
+				pipeW[j].Close()
+			}
+			return 1
+		}
+		pipes[i], pipeW[i] = r, w
 	}
 
 	type result struct{ code int }
