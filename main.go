@@ -88,6 +88,9 @@ func main() {
 			os.Exit(1)
 		}
 		src := strings.ReplaceAll(string(data), "\r\n", "\n")
+		// $0 is the script's path (as bash does), and error messages emitted while
+		// the script runs are prefixed with it rather than the interpreter name.
+		sh.SetName(args[0])
 		sh.SetPosParams(args[1:])
 		code := sh.EvalString(src)
 		os.Exit(code)

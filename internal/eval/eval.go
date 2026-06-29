@@ -175,6 +175,13 @@ func (sh *Shell) SetPosParams(params []string) {
 	sh.posParams = params
 }
 
+// SetName sets the shell's name, which is what $0 expands to and the prefix used
+// on error messages. For an interactive shell this is the interpreter name; when
+// executing a script it should be the script's path, matching bash.
+func (sh *Shell) SetName(name string) {
+	sh.name = name
+}
+
 // inlineEnv applies command-prefix assignments (e.g. `TZ= date`) on top of base,
 // returning the environment for the child process. Each assignment OVERRIDES any
 // existing entry for the same name rather than appending a duplicate — otherwise
@@ -906,6 +913,7 @@ func (sh *Shell) tryRunAsScript(path string, args []string, stdin io.Reader, std
 	sub.Stdin = stdin
 	sub.Stdout = stdout
 	sub.Stderr = stderr
+	sub.name = path // $0 is the script being run, not the interpreter
 	sub.SetPosParams(args)
 	// A script runs as a child: its `exit` returns a status to us, it does not
 	// terminate the interactive session that launched it.
