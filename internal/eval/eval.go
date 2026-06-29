@@ -77,6 +77,23 @@ type Shell struct {
 	Stdout io.Writer
 	Stderr io.Writer
 
+	// Raw console handles for the interactive terminal, if any. main sets these
+	// to os.Stdout/os.Stderr while Stdout/Stderr are colorable wrappers. When a
+	// foreground external command's output is the terminal (unredirected,
+	// unpiped), it is given these raw *os.File handles instead of the wrapper so
+	// the child sees a real console: tools like git then detect a TTY and enable
+	// color and paging. nil in non-interactive contexts (scripts, tests).
+	//
+	// TermOut/TermErr hold the matching colorable wrapper writers (the terminal
+	// sink itself). A child inherits the raw console only when its output writer
+	// is exactly that sink — i.e. genuinely the terminal. Comparing against the
+	// live Stdout would misfire inside a pipeline, where a stage's Stdout is the
+	// pipe writer, and wrongly send the stage's output to the console instead.
+	ConsoleOut *os.File
+	ConsoleErr *os.File
+	TermOut    io.Writer
+	TermErr    io.Writer
+
 	History []string
 }
 
@@ -757,6 +774,23 @@ func (sh *Shell) evalSimpleCmd(cmd *parser.SimpleCmd, stdin io.Reader, stdout, s
 	c.Stdout = rStdout
 	c.Stderr = rStderr
 
+	// When a foreground command's output still goes to the shell's terminal sink
+	// (no redirection or pipe rewrote it), hand the child the raw console
+	// *os.File rather than the colorable wrapper. Passing a non-*os.File makes
+	// Go's exec splice in an OS pipe, which hides the console from the child so
+	// git (and other TTY-aware tools) drop color and paging. The swap applies
+	// only when the child's output is the terminal sink itself (TermOut/TermErr);
+	// a redirection or pipe makes rStdout/rStderr something else, so it is left
+	// untouched and the data flows to the file or next stage as intended.
+	if !sh.isBackground {
+		if sh.ConsoleOut != nil && rStdout == sh.TermOut {
+			c.Stdout = sh.ConsoleOut
+		}
+		if sh.ConsoleErr != nil && rStderr == sh.TermErr {
+			c.Stderr = sh.ConsoleErr
+		}
+	}
+
 	if sh.isBackground {
 		// Detach stdin so the background process cannot consume key events
 		// from the console input buffer while the shell is reading input.
@@ -900,10 +934,14 @@ func (sh *Shell) fork() *Shell {
 		posParams: sh.posParams,
 		jobs:      sh.jobs,
 		traps:     sh.traps,
-		Stdin:     sh.Stdin,
-		Stdout:    sh.Stdout,
-		Stderr:    sh.Stderr,
-		lastExit:  sh.lastExit,
+		Stdin:      sh.Stdin,
+		Stdout:     sh.Stdout,
+		Stderr:     sh.Stderr,
+		ConsoleOut: sh.ConsoleOut,
+		ConsoleErr: sh.ConsoleErr,
+		TermOut:    sh.TermOut,
+		TermErr:    sh.TermErr,
+		lastExit:   sh.lastExit,
 	}
 	for k, v := range sh.vars {
 		child.vars[k] = v

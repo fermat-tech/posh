@@ -62,6 +62,17 @@ func main() {
 	sh := eval.New(progName)
 	sh.Stdout = colorStdout
 	sh.Stderr = colorStderr
+	// Remember the raw console handles so foreground children can inherit a real
+	// TTY (enabling git's color and pager) instead of the colorable wrapper,
+	// which would otherwise force an OS pipe. Only when output is a terminal.
+	if isatty.IsTerminal(os.Stdout.Fd()) || isatty.IsCygwinTerminal(os.Stdout.Fd()) {
+		sh.ConsoleOut = os.Stdout
+		sh.TermOut = colorStdout
+	}
+	if isatty.IsTerminal(os.Stderr.Fd()) || isatty.IsCygwinTerminal(os.Stderr.Fd()) {
+		sh.ConsoleErr = os.Stderr
+		sh.TermErr = colorStderr
+	}
 
 	// -c "command"
 	if len(args) >= 2 && args[0] == "-c" {
