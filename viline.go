@@ -324,13 +324,22 @@ func (vs *viState) handleInsert(key keyEvent) (done bool, line string, err error
 	return false, "", nil
 }
 
+// startsWithSpace reports whether s begins with a space or tab.
+func startsWithSpace(s string) bool {
+	return len(s) > 0 && (s[0] == ' ' || s[0] == '\t')
+}
+
 func (vs *viState) doComplete() {
 	if vs.completer == nil {
 		return
 	}
 	line := string(vs.buf)
 	origPos := vs.pos // cursor position before completion mutates vs.pos/vs.buf
-	head, completions, _ := vs.completer(line, vs.pos)
+	// tail is the part of the line after the cursor (everything past the word
+	// being completed). It must be preserved and kept after the cursor; dropping
+	// it would erase the rest of the line when completing a word mid-line (e.g.
+	// after a vi `cw`).
+	head, completions, tail := vs.completer(line, vs.pos)
 	if len(completions) == 0 {
 		return
 	}
@@ -340,19 +349,23 @@ func (vs *viState) doComplete() {
 		if strings.Contains(word, " ") {
 			word = `"` + word + `"`
 		}
-		newLine := head + word
-		if !strings.HasSuffix(word, "/") && !strings.HasSuffix(word, "/\"") {
-			newLine += " "
+		// Add a separating space after a finished word, but not for a directory
+		// (keep the trailing slash to continue the path) and not when the tail
+		// already begins with whitespace (avoid doubling the separator).
+		if !strings.HasSuffix(word, "/") && !strings.HasSuffix(word, "/\"") &&
+			!startsWithSpace(tail) {
+			word += " "
 		}
-		vs.buf = []rune(newLine)
-		vs.pos = len(vs.buf)
+		newHead := head + word
+		vs.buf = []rune(newHead + tail)
+		vs.pos = len([]rune(newHead))
 		vs.lastTabBuf = ""
 		vs.redraw()
 		return
 	}
 
 	common := viCommonPrefix(completions)
-	newLine := head + common
+	newHead := head + common
 	showList := string(vs.buf) == vs.lastTabBuf // second Tab with no change → list
 
 	// The fragment originally typed for this word: the runes of the original
@@ -366,8 +379,8 @@ func (vs *viState) doComplete() {
 		typed = string(lineRunes[headLen:origPos])
 	}
 
-	vs.buf = []rune(newLine)
-	vs.pos = len(vs.buf)
+	vs.buf = []rune(newHead + tail)
+	vs.pos = len([]rune(newHead))
 	vs.lastTabBuf = string(vs.buf)
 
 	if showList || common == typed {

@@ -86,6 +86,44 @@ func TestDoCompleteDirectoryNoTrailingSpace(t *testing.T) {
 	}
 }
 
+// TestDoCompleteMidLinePreservesTail covers completing a word in the middle of
+// the line (e.g. after a vi `cw`): the text after the cursor must be preserved,
+// not erased, and the cursor must land just after the inserted word.
+func TestDoCompleteMidLinePreservesTail(t *testing.T) {
+	// Line "cat no file2", cursor right after "no" (pos 6); tail is " file2".
+	completer := func(l string, pos int) (string, []string, string) {
+		return "cat ", []string{"notes.txt"}, " file2"
+	}
+	vs := &viState{buf: []rune("cat no file2"), pos: 6, mode: viInsert, completer: completer}
+	withSilencedStdout(t, func() { vs.doComplete() })
+
+	if got := string(vs.buf); got != "cat notes.txt file2" {
+		t.Fatalf("mid-line completion = %q, want %q", got, "cat notes.txt file2")
+	}
+	// The tail already begins with a space, so no separator is added and the
+	// cursor sits right after "cat notes.txt" (len 13), before the existing space.
+	if vs.pos != len([]rune("cat notes.txt")) {
+		t.Fatalf("cursor = %d, want %d", vs.pos, len([]rune("cat notes.txt")))
+	}
+}
+
+// TestDoCompleteMidLineMultiPreservesTail covers the common-prefix branch with a
+// non-empty tail.
+func TestDoCompleteMidLineMultiPreservesTail(t *testing.T) {
+	completer := func(l string, pos int) (string, []string, string) {
+		return "cmd ", []string{"report1", "report2"}, " arg"
+	}
+	vs := &viState{buf: []rune("cmd rep arg"), pos: 7, mode: viInsert, completer: completer}
+	withSilencedStdout(t, func() { vs.doComplete() })
+
+	if got := string(vs.buf); got != "cmd report arg" {
+		t.Fatalf("mid-line multi completion = %q, want %q", got, "cmd report arg")
+	}
+	if vs.pos != len([]rune("cmd report")) {
+		t.Fatalf("cursor = %d, want %d", vs.pos, len([]rune("cmd report")))
+	}
+}
+
 // TestDoCompleteNoMatchesIsNoop ensures an empty completion list leaves the
 // buffer untouched and does not panic.
 func TestDoCompleteNoMatchesIsNoop(t *testing.T) {
