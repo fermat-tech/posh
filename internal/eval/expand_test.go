@@ -33,6 +33,31 @@ func evalRaw(sh *Shell, src string) string {
 	return buf.String()
 }
 
+// TestSetVersion covers $POSH_VERSION and the $POSH_VERSINFO array set up by
+// SetVersion, mirroring bash's $BASH_VERSION / $BASH_VERSINFO: a bare
+// $POSH_VERSINFO (no index) yields element 0, the major version.
+func TestSetVersion(t *testing.T) {
+	sh := New("posh")
+	sh.SetVersion("v1.3.51")
+	if got := evalRaw(sh, `echo "$POSH_VERSION"`); strings.TrimRight(got, "\n") != "v1.3.51" {
+		t.Fatalf("POSH_VERSION = %q, want %q", got, "v1.3.51")
+	}
+	if got := evalRaw(sh, `echo "$POSH_VERSINFO"`); strings.TrimRight(got, "\n") != "1" {
+		t.Fatalf("bare POSH_VERSINFO = %q, want %q (major version)", got, "1")
+	}
+	if got := evalRaw(sh, `echo "${POSH_VERSINFO[0]} ${POSH_VERSINFO[1]} ${POSH_VERSINFO[2]}"`); strings.TrimRight(got, "\n") != "1 3 51" {
+		t.Fatalf("POSH_VERSINFO[0..2] = %q, want %q", got, "1 3 51")
+	}
+
+	// An untagged "dev" build degrades to all-zero numeric components rather
+	// than failing or leaving stale values from a previous SetVersion call.
+	sh2 := New("posh")
+	sh2.SetVersion("dev")
+	if got := evalRaw(sh2, `echo "${POSH_VERSINFO[0]} ${POSH_VERSINFO[1]} ${POSH_VERSINFO[2]}"`); strings.TrimRight(got, "\n") != "0 0 0" {
+		t.Fatalf("POSH_VERSINFO for dev build = %q, want %q", got, "0 0 0")
+	}
+}
+
 func TestVarAssignmentAndExpansion(t *testing.T) {
 	if got := eval(t, `NAME=world; echo "Hello $NAME"`); got != "Hello world" {
 		t.Fatalf("got %q", got)

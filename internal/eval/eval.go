@@ -9,6 +9,8 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
+	"strconv"
 	"strings"
 
 	"github.com/fermat-tech/posh/internal/parser"
@@ -180,6 +182,36 @@ func (sh *Shell) SetPosParams(params []string) {
 // executing a script it should be the script's path, matching bash.
 func (sh *Shell) SetName(name string) {
 	sh.name = name
+}
+
+// SetVersion sets $POSH_VERSION and the $POSH_VERSINFO array, mirroring bash's
+// $BASH_VERSION / $BASH_VERSINFO. version is the release tag as reported by
+// `posh --version` (e.g. "v1.3.51", or "dev" for a build with no tag supplied).
+func (sh *Shell) SetVersion(version string) {
+	sh.vars["POSH_VERSION"] = version
+	major, minor, patch := parseVersionParts(version)
+	// Bash's array is (major minor patchlevel build release machtype); posh has
+	// no separate build/release concept beyond the tag itself, so the array is
+	// (major minor patch machtype). A bare $POSH_VERSINFO (no index) yields
+	// element 0, the major version — matching $BASH_VERSINFO's behavior.
+	sh.arrays["POSH_VERSINFO"] = []string{major, minor, patch, runtime.GOOS + "-" + runtime.GOARCH}
+}
+
+// parseVersionParts splits a "vMAJOR.MINOR.PATCH"-shaped version string into its
+// three numeric components, defaulting any missing or non-numeric part to "0"
+// (e.g. for an untagged "dev" build) rather than failing.
+func parseVersionParts(v string) (major, minor, patch string) {
+	parts := strings.SplitN(strings.TrimPrefix(v, "v"), ".", 3)
+	get := func(i int) string {
+		if i >= len(parts) {
+			return "0"
+		}
+		if _, err := strconv.Atoi(parts[i]); err != nil {
+			return "0"
+		}
+		return parts[i]
+	}
+	return get(0), get(1), get(2)
 }
 
 // inlineEnv applies command-prefix assignments (e.g. `TZ= date`) on top of base,

@@ -85,6 +85,7 @@ func main() {
 	}
 
 	sh := eval.New(progName)
+	sh.SetVersion(version)
 	sh.Stdout = colorStdout
 	sh.Stderr = colorStderr
 	// Remember the raw console handles so foreground children can inherit a real
