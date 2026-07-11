@@ -1124,9 +1124,17 @@ func NeedsContinuation(input string) bool {
 	if l.Incomplete {
 		return true
 	}
-	// An unterminated quote is a lexer error; let the evaluator report it rather
-	// than prompting forever for more input.
 	if len(l.Errors) > 0 {
+		// A quote that simply hasn't been closed yet (e.g. the user is typing a
+		// multi-line quoted string) needs more input, matching bash's PS2
+		// continuation — the closing quote may be on a later line. A quote fused
+		// onto a preceding bareword that broke on an embedded newline
+		// (MidWordQuoteBreak) is excluded: that stays a hard, immediate error.
+		if l.UnterminatedQuote && !l.MidWordQuoteBreak {
+			return true
+		}
+		// Any other lexer error is let the evaluator report rather than
+		// prompting forever for more input.
 		return false
 	}
 

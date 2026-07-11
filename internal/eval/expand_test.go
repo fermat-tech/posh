@@ -49,6 +49,12 @@ func TestSingleVsDoubleQuotes(t *testing.T) {
 	if got := eval(t, `X=v; echo "$X"`); got != "v" {
 		t.Fatalf("double quotes should expand, got %q", got)
 	}
+	// A single-quoted string is 100% literal in bash, including any embedded
+	// newline: it must survive as one argument and not be word-split like an
+	// unquoted word would be (echo 'a\nb' prints "a\nb", not "a b").
+	if got := eval(t, "echo 'line1\nline2'"); got != "line1\nline2" {
+		t.Fatalf("embedded newline in single quotes should be literal, got %q", got)
+	}
 }
 
 func TestCommandSubstitution(t *testing.T) {

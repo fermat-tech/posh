@@ -243,3 +243,20 @@ func TestHeredocPending(t *testing.T) {
 		t.Errorf("here-string should not be pending")
 	}
 }
+
+// TestNeedsContinuationOpenQuoteWaitsForClose reproduces the interactive-REPL
+// case: a quoted string still open at end-of-input should wait for more input
+// (bash's PS2 continuation), not be treated as ready to evaluate immediately.
+func TestNeedsContinuationOpenQuoteWaitsForClose(t *testing.T) {
+	cases := []string{
+		`sqs='Serial number: MP2PNV5X`,
+		`dqs="Serial number: MP2PNV5X`,
+		`echo 'still open`,
+		`echo "still open`,
+	}
+	for _, s := range cases {
+		if !NeedsContinuation(s) {
+			t.Errorf("NeedsContinuation(%q) = false, want true (open quote)", s)
+		}
+	}
+}

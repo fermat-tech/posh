@@ -130,6 +130,21 @@ type Lexer struct {
 	line       int      // current 1-based line number
 	Errors     []string // unterminated-string diagnostics
 	Incomplete bool     // input ended mid-construct (e.g. an unterminated array literal)
+
+	// UnterminatedQuote is true when the input ran out while a quote was still
+	// open. Bash treats this as "wait for more input" at an interactive prompt
+	// (PS2), since a quoted string may legitimately span many lines; posh's REPL
+	// uses this to decide the same way, rather than reporting an error on the
+	// first Enter press. See MidWordQuoteBreak for the one case that stays a
+	// hard, immediate error instead.
+	UnterminatedQuote bool
+
+	// MidWordQuoteBreak is true when a quote fused onto a preceding bareword
+	// (e.g. foo'bar) contained an embedded newline before ever closing. Unlike a
+	// plain open quote, this is always a hard error — not something more input
+	// resolves — since it usually indicates the user pressed Enter by mistake
+	// rather than intending a multi-line quoted value.
+	MidWordQuoteBreak bool
 }
 
 // New creates a Lexer for the given input string.
@@ -610,6 +625,14 @@ func (l *Lexer) readWord() string {
 					sb.WriteRune(protectedSpace)
 				case '\t':
 					sb.WriteRune(protectedTab)
+				case '\n':
+					// A single-quoted string is 100% literal in bash — even an
+					// embedded newline. Left unprotected, it would be treated as
+					// an ordinary IFS separator during word-splitting and break
+					// the quoted string into multiple arguments (e.g. echo
+					// 'line1\nline2' would print as two space-joined args instead
+					// of preserving the embedded newline).
+					sb.WriteRune(protectedNewline)
 				case '$':
 					sb.WriteRune(protectedDollar)
 				case '\\':
@@ -830,6 +853,7 @@ func (l *Lexer) readSingleQuotedCtx(midWord bool) string {
 		ch, ok := l.peek()
 		if !ok {
 			l.Errors = append(l.Errors, l.unquoteErr('\'', startLine, preview.String()))
+			l.UnterminatedQuote = true
 			break
 		}
 		if ch == '\'' {
@@ -838,6 +862,7 @@ func (l *Lexer) readSingleQuotedCtx(midWord bool) string {
 		}
 		if midWord && ch == '\n' && !errSet {
 			l.Errors = append(l.Errors, l.unquoteErr('\'', startLine, preview.String()))
+			l.MidWordQuoteBreak = true
 			errSet = true
 		}
 		l.advance()
@@ -867,6 +892,7 @@ func (l *Lexer) readDoubleQuotedCtx(midWord bool) string {
 		ch, ok := l.peek()
 		if !ok {
 			l.Errors = append(l.Errors, l.unquoteErr('"', startLine, preview.String()))
+			l.UnterminatedQuote = true
 			break
 		}
 		if ch == '"' {
@@ -875,6 +901,7 @@ func (l *Lexer) readDoubleQuotedCtx(midWord bool) string {
 		}
 		if midWord && ch == '\n' && !errSet {
 			l.Errors = append(l.Errors, l.unquoteErr('"', startLine, preview.String()))
+			l.MidWordQuoteBreak = true
 			errSet = true
 		}
 		if previewLen < 10 {
