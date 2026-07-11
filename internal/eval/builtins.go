@@ -557,9 +557,9 @@ func builtinType(sh *Shell, args []string, _ io.Reader, stdout, stderr io.Writer
 	return code
 }
 
-func builtinHelp(_ *Shell, _ []string, _ io.Reader, stdout, _ io.Writer) int {
-	fmt.Fprintln(stdout, `posh — Portable Shell
-
+func builtinHelp(sh *Shell, _ []string, _ io.Reader, stdout, _ io.Writer) int {
+	fmt.Fprintf(stdout, "%s — Portable Shell\n", sh.name)
+	fmt.Fprintln(stdout, `
 Built-in commands:
   cd [dir]            Change directory (default: $HOME)
   pwd                 Print working directory

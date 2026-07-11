@@ -23,6 +23,25 @@ func init() {
 	progName = strings.TrimSuffix(name, filepath.Ext(name))
 }
 
+// version is the release tag (e.g. "v1.3.49"). Overridden at build time via
+// -ldflags "-X main.version=vX.Y.Z"; "dev" for a plain `go build` with no tag
+// supplied.
+var version = "dev"
+
+// printVersion mirrors `bash --version`'s layout, using progName (the stem of
+// the invoked path, per posh's rename-friendly identity convention — see
+// CLAUDE.md) instead of a fixed "posh", and this project's actual license
+// instead of bash's GPL.
+func printVersion() {
+	fmt.Fprintf(colorStdout, `%s, version %s
+Copyright (c) 2025 fermat-tech
+License: MIT <https://opensource.org/licenses/MIT>
+
+This is free software; you are free to change and redistribute it.
+There is NO WARRANTY, to the extent permitted by law.
+`, progName, version)
+}
+
 var colorStdout = colorable.NewColorableStdout()
 var colorStderr = colorable.NewColorableStderr()
 
@@ -59,6 +78,12 @@ func main() {
 	}()
 
 	args := os.Args[1:]
+
+	if len(args) >= 1 && args[0] == "--version" {
+		printVersion()
+		os.Exit(0)
+	}
+
 	sh := eval.New(progName)
 	sh.Stdout = colorStdout
 	sh.Stderr = colorStderr

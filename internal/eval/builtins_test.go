@@ -3,6 +3,7 @@ package eval
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -65,6 +66,17 @@ func TestExportEnvAndUnset(t *testing.T) {
 	}
 	if got := eval(t, `FOO=bar; unset FOO; echo "[${FOO}]"`); got != "[]" {
 		t.Fatalf("unset = %q", got)
+	}
+}
+
+// TestHelpUsesShellName ensures the help builtin's title follows posh's
+// rename-friendly identity convention (the invoked name), rather than a fixed
+// "posh" string that would be wrong if the binary were renamed.
+func TestHelpUsesShellName(t *testing.T) {
+	sh := New("myshell")
+	got := evalRaw(sh, "help")
+	if !strings.HasPrefix(got, "myshell — Portable Shell") {
+		t.Fatalf("help title = %q, want prefix %q", got, "myshell — Portable Shell")
 	}
 }
 
