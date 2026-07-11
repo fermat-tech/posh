@@ -148,6 +148,20 @@ func (sh *Shell) Vars() map[string]string {
 	}
 	return out
 }
+
+// ArrayNames returns the names of all indexed and associative array variables
+// (e.g. POSH_VERSINFO), for tab completion. Vars() alone misses these since
+// they live in separate maps, not sh.vars.
+func (sh *Shell) ArrayNames() []string {
+	names := make([]string, 0, len(sh.arrays)+len(sh.assoc))
+	for k := range sh.arrays {
+		names = append(names, k)
+	}
+	for k := range sh.assoc {
+		names = append(names, k)
+	}
+	return names
+}
 func (sh *Shell) GetOpt(name string) bool   { return sh.opts[name] }
 func (sh *Shell) SetOpt(name string, val bool) {
 	if val {

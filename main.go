@@ -444,6 +444,17 @@ func (c *poshCompleter) varCandidates(prefix string) []string {
 			out = append(out, "$"+k)
 		}
 	}
+	// Array variables (e.g. POSH_VERSINFO) live in a separate map from scalars,
+	// so Vars() alone would never offer them — without this, a prefix matching
+	// both a scalar and an array variable (like BASH_VERSI matching both
+	// BASH_VERSINFO and BASH_VERSION in bash) would resolve as a single match
+	// instead of listing both alternatives.
+	for _, k := range c.sh.ArrayNames() {
+		if strings.HasPrefix(strings.ToLower(k), varPrefix) && !seen[k] {
+			seen[k] = true
+			out = append(out, "$"+k)
+		}
+	}
 	// Also include exported OS env vars
 	for _, kv := range os.Environ() {
 		k := strings.SplitN(kv, "=", 2)[0]
