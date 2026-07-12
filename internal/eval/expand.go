@@ -232,6 +232,36 @@ func (sh *Shell) expandInsideDoubleQuotes(s string) string {
 	return sb.String()
 }
 
+// protectFromSplitting replaces characters that would otherwise be split on by
+// wordSplit or expanded by globExpand with their protected sentinel
+// equivalents, so already-fully-expanded text (e.g. a mid-word quoted segment,
+// or a $var expansion within one) survives those later passes as a single
+// literal chunk instead of being torn apart -- mirroring how the lexer
+// protects a mid-word single-quoted segment at tokenization time.
+func protectFromSplitting(s string) string {
+	if !strings.ContainsAny(s, " \t*?[") {
+		return s
+	}
+	var sb strings.Builder
+	for _, ch := range s {
+		switch ch {
+		case ' ':
+			sb.WriteRune(protectedSpace)
+		case '\t':
+			sb.WriteRune(protectedTab)
+		case '*':
+			sb.WriteRune(protectedStar)
+		case '?':
+			sb.WriteRune(protectedQuestion)
+		case '[':
+			sb.WriteRune(protectedLBracket)
+		default:
+			sb.WriteRune(ch)
+		}
+	}
+	return sb.String()
+}
+
 // expandUnquoted expands a bare (unquoted) word.
 func (sh *Shell) expandUnquoted(s string) string {
 	var sb strings.Builder
@@ -245,23 +275,37 @@ func (sh *Shell) expandUnquoted(s string) string {
 			sb.WriteString(val)
 			i += n
 		case '\'':
-			// Single-quoted segment — literal until closing '
+			// Single-quoted segment — literal until closing '. Protected the
+			// same way as a nested double-quoted segment below (see there for
+			// why); in practice the lexer already protects a mid-word
+			// single-quoted segment at tokenization time, so this path is
+			// rarely reached, but it has the same bug if it ever is.
 			i++
+			start := i
 			for i < len(runes) && runes[i] != '\'' {
-				sb.WriteRune(runes[i])
 				i++
 			}
+			sb.WriteString(protectFromSplitting(string(runes[start:i])))
 			if i < len(runes) {
 				i++ // closing '
 			}
 		case '"':
-			// Nested double-quoted segment
+			// Nested double-quoted segment. Unlike a mid-word single-quoted
+			// segment (which the lexer already protects character-by-character
+			// at tokenization time), a mid-word double-quoted segment reaches
+			// here as literal text between real '"' runes, relying on
+			// expandWord's whole-word double-quote fast path to skip
+			// word-splitting -- but that fast path only triggers when the
+			// ENTIRE word is quoted (e.g. echo "git status"), not when the
+			// quotes are only part of a larger word (e.g. gsd="git status").
+			// Protect the expanded result here so a later word-splitting pass
+			// in expandWords does not break it apart on internal whitespace.
 			i++
 			start := i
 			for i < len(runes) && runes[i] != '"' {
 				i++
 			}
-			sb.WriteString(sh.expandInsideDoubleQuotes(string(runes[start:i])))
+			sb.WriteString(protectFromSplitting(sh.expandInsideDoubleQuotes(string(runes[start:i]))))
 			if i < len(runes) {
 				i++ // closing "
 			}

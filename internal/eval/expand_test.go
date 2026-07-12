@@ -82,6 +82,28 @@ func TestSingleVsDoubleQuotes(t *testing.T) {
 	}
 }
 
+// TestMixedQuotingPreservesInternalWhitespace reproduces the reported alias
+// bug: a double-quoted segment that is only PART of a larger word (e.g.
+// gsd="git status", as opposed to a whole double-quoted word) must still
+// protect its internal whitespace from word-splitting, the same way an
+// equivalent single-quoted segment already does. Without protecting the
+// nested double-quoted segment's expanded text, `alias gsd="git status"`
+// silently truncated the alias value to "git".
+func TestMixedQuotingPreservesInternalWhitespace(t *testing.T) {
+	if got := eval(t, `alias gss='git status' gsd="git status"; alias gss gsd`); got !=
+		"alias gss=\"git status\"\nalias gsd=\"git status\"" {
+		t.Fatalf("mixed quoting in alias args = %q", got)
+	}
+	// A $var expansion inside a mid-word double-quoted segment must also be
+	// protected, and a glob metacharacter inside one must not be expanded.
+	if got := eval(t, `V="a b"; echo X"$V"Y`); got != "Xa bY" {
+		t.Fatalf("var expansion in mid-word double quotes = %q, want %q", got, "Xa bY")
+	}
+	if got := eval(t, `echo pre"*.go"post`); got != "pre*.gopost" {
+		t.Fatalf("glob char in mid-word double quotes should not expand, got %q", got)
+	}
+}
+
 func TestCommandSubstitution(t *testing.T) {
 	if got := eval(t, `echo "[$(echo inner)]"`); got != "[inner]" {
 		t.Fatalf("got %q", got)
