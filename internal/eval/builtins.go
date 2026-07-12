@@ -617,7 +617,14 @@ func builtinJobs(sh *Shell, args []string, _ io.Reader, stdout, _ io.Writer) int
 	long := len(args) > 0 && args[0] == "-l"
 	for _, j := range sh.jobs.list() {
 		if long {
-			fmt.Fprintf(stdout, "[%d] %d Running\t%s\n", j.ID, j.Cmd.Process.Pid, j.Desc)
+			// A goroutine-backed job (see jobs.go) has no real OS PID to
+			// report -- it's a backgrounded compound command running inside
+			// posh's own process, not a separate process at all.
+			pid := "-"
+			if j.IsProcess() {
+				pid = strconv.Itoa(j.Cmd.Process.Pid)
+			}
+			fmt.Fprintf(stdout, "[%d] %s Running\t%s\n", j.ID, pid, j.Desc)
 		} else {
 			fmt.Fprintf(stdout, "[%d] Running\t%s\n", j.ID, j.Desc)
 		}
@@ -642,7 +649,7 @@ func builtinFg(sh *Shell, args []string, _ io.Reader, _, stderr io.Writer) int {
 		}
 	}
 	fmt.Fprintf(os.Stderr, "%s\n", j.Desc)
-	j.Cmd.Wait()
+	j.Wait()
 	return 0
 }
 
@@ -669,14 +676,14 @@ func builtinBg(sh *Shell, args []string, _ io.Reader, _, stderr io.Writer) int {
 func builtinWait(sh *Shell, args []string, _ io.Reader, _, _ io.Writer) int {
 	if len(args) == 0 {
 		for _, j := range sh.jobs.list() {
-			j.Cmd.Wait()
+			j.Wait()
 		}
 		return 0
 	}
 	id := parseJobID(args[0])
 	for _, j := range sh.jobs.list() {
 		if j.ID == id {
-			j.Cmd.Wait()
+			j.Wait()
 			return 0
 		}
 	}
@@ -729,14 +736,9 @@ func builtinKill(sh *Shell, args []string, _ io.Reader, stdout, stderr io.Writer
 			for _, j := range sh.jobs.list() {
 				if j.ID == id {
 					found = true
-					// Kill the entire process tree so grandchild processes
-					// (e.g. sleep inside a posh -c "..." job) are also terminated.
-					if err := killProcessTree(j.Cmd.Process.Pid); err != nil {
-						// Fall back to a direct signal if taskkill is unavailable.
-						if serr := j.Cmd.Process.Signal(sig); serr != nil {
-							fmt.Fprintf(stderr, "%s: kill: %%%d: %v\n", sh.name, id, serr)
-							code = 1
-						}
+					if err := j.RequestStop(sig); err != nil {
+						fmt.Fprintf(stderr, "%s: kill: %%%d: %v\n", sh.name, id, err)
+						code = 1
 					}
 					break
 				}

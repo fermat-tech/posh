@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"os/signal"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -60,22 +59,20 @@ func main() {
 		}
 	}()
 
-	// Keep the shell alive across Ctrl+C for the whole session. A foreground
-	// external command forwards the interrupt to its own process group (see
-	// eval.evalSimpleCmd), but the shell itself must never take the default
-	// terminate action. Registering a persistent handler keeps os.Interrupt
+	// Keep the shell alive across Ctrl+C for the whole session, and let a
+	// foreground loop/statement list notice the interrupt and stop running (see
+	// eval.WatchInterrupts / eval.EvalStringAt) instead of silently continuing
+	// to its next iteration or statement. A foreground external command
+	// additionally forwards the interrupt directly to its own process group
+	// (see eval.evalSimpleCmd), which is what makes something like `sleep 5`
+	// stop immediately; this handler is what then lets the loop containing it
+	// stop too, matching bash. The shell itself must never take the default
+	// terminate action — registering a persistent handler keeps os.Interrupt
 	// "wanted" so the Windows console control handler always reports the event
-	// as handled — even at the prompt, between command runs, or when a
-	// background job also receives the console's CTRL_C_EVENT. The goroutine
-	// just drains the channel; the line editors handle Ctrl+C as a line-abort
-	// while reading input. Foreground commands additionally Notify their own
-	// channel, so this does not interfere with interrupt forwarding.
-	sessionSig := make(chan os.Signal, 1)
-	signal.Notify(sessionSig, os.Interrupt)
-	go func() {
-		for range sessionSig {
-		}
-	}()
+	// as handled, even at the prompt or when a background job also receives the
+	// console's CTRL_C_EVENT. The line editors separately handle Ctrl+C as a
+	// line-abort while reading input, which this does not interfere with.
+	eval.WatchInterrupts()
 
 	args := os.Args[1:]
 

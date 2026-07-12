@@ -31,12 +31,21 @@ type shellExit struct{ code int }
 
 // catchExit runs fn and converts a shellExit panic into a returned exit code.
 // It is used at every boundary where `exit` must terminate only the nested
-// context rather than the whole process. Other panics propagate unchanged.
+// context rather than the whole process. A shellInterrupt (Ctrl+C; see
+// interrupt.go) is absorbed the same way, reported as exit code 130
+// (128+SIGINT, matching bash) -- this boundary is also what stops a
+// shellInterrupt from escaping a subshell/pipeline-stage/background-job
+// goroutine uncaught, which would otherwise crash the process. Other panics
+// propagate unchanged.
 func catchExit(fn func() int) (code int) {
 	defer func() {
 		if r := recover(); r != nil {
 			if ex, ok := r.(shellExit); ok {
 				code = ex.code
+				return
+			}
+			if _, ok := r.(shellInterrupt); ok {
+				code = 130
 				return
 			}
 			panic(r)
@@ -72,7 +81,21 @@ type Shell struct {
 	jobs      *JobTable
 	traps     map[string]string // signal name → command
 	opts         map[string]bool   // shell options: set -o name / set +o name
-	isBackground bool              // true when running as a background job goroutine
+	isBackground bool              // true anywhere within a background job's execution tree; propagates through fork()
+	jobKill      *int32            // this job's kill flag, if isBackground (see checkInterrupt); propagates through fork()
+
+	// backgroundLaunch is true only for the immediate child shell evalNode
+	// creates for a node marked background=true (a statement with a trailing
+	// &) -- never inherited by any further fork() a nested execution makes.
+	// evalSimpleCmd reads this (not isBackground) to decide whether THIS one
+	// external command should detach as its own new OS process and register
+	// as a new Job. Without this distinction, an external command anywhere
+	// inside an already-backgrounded compound command (e.g. `sleep 1` inside
+	// `(while true; do echo hi; sleep 1; done) &`, which has no & of its own)
+	// would also detach and self-register as a new job every time it ran --
+	// non-blocking, so the loop span at full speed with no real delay, firing
+	// off one leaked job per iteration.
+	backgroundLaunch bool
 
 	// I/O streams for this shell instance
 	Stdin  io.Reader
@@ -320,8 +343,28 @@ func (sh *Shell) EvalString(s string) int {
 	return sh.EvalStringAt(s, 1)
 }
 
-// EvalStringAt parses and evaluates s, reporting errors with lineBase as the first line number.
-func (sh *Shell) EvalStringAt(s string, lineBase int) int {
+// EvalStringAt parses and evaluates s, reporting errors with lineBase as the
+// first line number.
+//
+// If Ctrl+C interrupts the running command (a shellInterrupt panic; see
+// interrupt.go), evaluation stops here and 130 is returned (128+SIGINT,
+// bash's convention) instead of letting the panic escape further -- this is
+// the outermost per-command boundary, where a foreground Ctrl+C should stop
+// just the command that was running, not the whole session. This is
+// deliberately not implemented via catchExit: a shellExit (the exit builtin)
+// must keep propagating past this point untouched, so a top-level `exit`
+// still ends the session rather than being absorbed here alongside interrupts.
+func (sh *Shell) EvalStringAt(s string, lineBase int) (code int) {
+	defer func() {
+		if r := recover(); r != nil {
+			if _, ok := r.(shellInterrupt); ok {
+				code = 130
+				sh.lastExit = 130
+				return
+			}
+			panic(r)
+		}
+	}()
 	s = preprocessHeredocs(s)
 	node, err := parser.ParseAt(s, lineBase)
 	if err != nil {
@@ -331,7 +374,7 @@ func (sh *Shell) EvalStringAt(s string, lineBase int) int {
 		return 1
 	}
 	sh.parseErr = false
-	code := sh.Eval(node)
+	code = sh.Eval(node)
 	sh.lastExit = code
 	return code
 }
@@ -360,6 +403,11 @@ func (sh *Shell) evalList(list *parser.List) int {
 	// bare subshell don't route through evalPipeline, which is the other place
 	// lastExit is maintained.
 	sh.lastExit = code
+	// Every loop body, loop condition, and top-level statement sequence passes
+	// through here, making this the one place that needs to poll for Ctrl+C to
+	// stop a `while true; do ...; done` (or any other loop) rather than just the
+	// single command that happened to be running when the interrupt arrived.
+	sh.checkInterrupt()
 
 	for i, elem := range list.Elems {
 		if elem.Node == nil {
@@ -383,6 +431,7 @@ func (sh *Shell) evalList(list *parser.List) int {
 			code = 0
 		}
 		sh.lastExit = code
+		sh.checkInterrupt()
 	}
 	return code
 }
@@ -394,11 +443,74 @@ func (sh *Shell) evalNode(n parser.Node, background bool) int {
 	if background {
 		child := sh.fork()
 		child.isBackground = true
-		// `exit` in a background job ends that job only.
-		go catchExit(func() int { return child.Eval(n) })
+
+		// A backgrounded plain command is left to evalSimpleCmd's own
+		// isBackground handling, which for an external command already starts
+		// a real OS process and registers a proper process-backed Job (see
+		// jobs.go) -- that path reports a real PID and can deliver a real
+		// signal, which this generic path cannot. Every other backgrounded
+		// node (a subshell, loop, group, a real multi-stage pipeline, if/case,
+		// ...) spawns no OS process of its own, so without this it runs as a
+		// bare untracked goroutine: invisible to `jobs`, and with no way to
+		// stop it via `kill %n` short of exiting the whole shell. Register a
+		// goroutine-backed Job for those so job control can at least see and
+		// stop them, even though there's no real process behind them.
+		//
+		// The parser always wraps a plain command in a single-Cmd *Pipeline
+		// (see parsePipeline), while a compound command is only wrapped in one
+		// if an actual | follows it (see maybeWrapInPipeline) -- so unwrap a
+		// single-Cmd Pipeline before checking, or this would never match a
+		// plain backgrounded command at all.
+		target := n
+		if pipe, ok := n.(*parser.Pipeline); ok && len(pipe.Cmds) == 1 {
+			target = pipe.Cmds[0]
+		}
+		if _, isSimple := target.(*parser.SimpleCmd); isSimple {
+			// Only this immediate command actually had the trailing & -- it,
+			// and nothing nested any deeper, is what should detach as its own
+			// OS process (see the backgroundLaunch field doc).
+			child.backgroundLaunch = true
+			// `exit` in a background job ends that job only.
+			go catchExit(func() int { return child.Eval(n) })
+			return 0
+		}
+
+		job, finish := sh.jobs.addGoroutine(describeNode(n))
+		child.jobKill = job.kill
+		go func() {
+			defer finish()
+			catchExit(func() int { return child.Eval(n) })
+		}()
 		return 0
 	}
 	return sh.Eval(n)
+}
+
+// describeNode returns a short, human-readable label for a backgrounded
+// compound command, shown by `jobs -l` and in the "[N] Done" message. It is
+// not a reconstruction of the original source text (posh's AST does not keep
+// one) -- just enough to tell job entries apart at a glance.
+func describeNode(n parser.Node) string {
+	switch n.(type) {
+	case *parser.Subshell:
+		return "(subshell)"
+	case *parser.GroupCmd:
+		return "{ group }"
+	case *parser.WhileCmd:
+		return "while loop"
+	case *parser.ForCmd:
+		return "for loop"
+	case *parser.IfCmd:
+		return "if command"
+	case *parser.CaseCmd:
+		return "case command"
+	case *parser.Pipeline:
+		return "pipeline"
+	case *parser.List:
+		return "command list"
+	default:
+		return "compound command"
+	}
 }
 
 func (sh *Shell) evalPipeline(pipe *parser.Pipeline) int {
@@ -861,7 +973,7 @@ func (sh *Shell) evalSimpleCmd(cmd *parser.SimpleCmd, stdin io.Reader, stdout, s
 		}
 	}
 
-	if sh.isBackground {
+	if sh.backgroundLaunch {
 		// Detach stdin so the background process cannot consume key events
 		// from the console input buffer while the shell is reading input.
 		if devNull, err := os.Open(os.DevNull); err == nil {
@@ -1008,11 +1120,13 @@ func (sh *Shell) fork() *Shell {
 		Stdin:      sh.Stdin,
 		Stdout:     sh.Stdout,
 		Stderr:     sh.Stderr,
-		ConsoleOut: sh.ConsoleOut,
-		ConsoleErr: sh.ConsoleErr,
-		TermOut:    sh.TermOut,
-		TermErr:    sh.TermErr,
-		lastExit:   sh.lastExit,
+		ConsoleOut:   sh.ConsoleOut,
+		ConsoleErr:   sh.ConsoleErr,
+		TermOut:      sh.TermOut,
+		TermErr:      sh.TermErr,
+		lastExit:     sh.lastExit,
+		isBackground: sh.isBackground,
+		jobKill:      sh.jobKill,
 	}
 	for k, v := range sh.vars {
 		child.vars[k] = v
