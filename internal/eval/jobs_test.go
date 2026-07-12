@@ -93,6 +93,62 @@ func TestBackgroundedSubshellRegistersJob(t *testing.T) {
 	}
 }
 
+// TestKillStopsJobImmediatelyEvenMidSleep reproduces the reported bug: kill
+// %n on a backgrounded compound command waited for the currently-running
+// background command to finish before the job actually stopped, because the
+// kill flag alone is only noticed between statements (see checkInterrupt) --
+// not while blocked inside a long-running external command. RequestStop must
+// also kill whatever process is currently running inside the job's execution
+// tree, so a job blocked in e.g. `sleep 5` stops immediately, not five
+// seconds (or however long is left) later.
+func TestKillStopsJobImmediatelyEvenMidSleep(t *testing.T) {
+	sh := New("posh")
+	var buf bytes.Buffer
+	sh.Stdout, sh.Stderr = &buf, &buf
+
+	done := make(chan int, 1)
+	go func() {
+		done <- sh.EvalString("(while true; do sleep 5; done) &")
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("backgrounding statement should return immediately")
+	}
+
+	var jobs []*Job
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		jobs = sh.jobs.list()
+		if len(jobs) == 1 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if len(jobs) != 1 {
+		t.Fatalf("jobs.list() = %d entries, want 1", len(jobs))
+	}
+	job := jobs[0]
+
+	// Give the job a moment to actually get into the sleep 5 call before
+	// killing it, so this test exercises the "blocked mid-command" case
+	// rather than possibly landing between iterations by luck.
+	time.Sleep(300 * time.Millisecond)
+
+	start := time.Now()
+	if err := job.RequestStop(os.Kill); err != nil {
+		t.Fatalf("RequestStop: %v", err)
+	}
+	select {
+	case <-job.done:
+		if elapsed := time.Since(start); elapsed > 2*time.Second {
+			t.Fatalf("job took %v to stop after RequestStop -- it waited for the sleep instead of being killed immediately", elapsed)
+		}
+	case <-time.After(4 * time.Second):
+		t.Fatal("job did not stop within 4s of RequestStop -- it waited for sleep 5 to finish naturally")
+	}
+}
+
 // TestBackgroundedPlainCommandStillUsesRealProcess ensures the fix for the
 // subshell case above did not regress the pre-existing, working case: a plain
 // backgrounded external command must still detach as a real OS process (a

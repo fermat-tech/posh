@@ -84,6 +84,7 @@ type Shell struct {
 	opts         map[string]bool   // shell options: set -o name / set +o name
 	isBackground bool              // true anywhere within a background job's execution tree; propagates through fork()
 	jobKill      *int32            // this job's kill flag, if isBackground (see checkInterrupt); propagates through fork()
+	jobProc      *jobProcSet       // this job's currently-running-process set, if isBackground (see jobs.go); propagates through fork()
 
 	// backgroundLaunch is true only for the immediate child shell evalNode
 	// creates for a node marked background=true (a statement with a trailing
@@ -520,6 +521,7 @@ func (sh *Shell) evalNode(n parser.Node, background bool) int {
 
 		job, finish := sh.jobs.addGoroutine(describeNode(n))
 		child.jobKill = job.kill
+		child.jobProc = job.procs
 		go func() {
 			defer finish()
 			catchExit(func() int { return child.Eval(n) })
@@ -1094,6 +1096,17 @@ func (sh *Shell) evalSimpleCmd(cmd *parser.SimpleCmd, stdin io.Reader, stdout, s
 		}
 	}()
 
+	// If this command is running inside a background job's execution tree,
+	// track it so RequestStop (`kill %n`) can kill it immediately -- without
+	// this, killing the job only sets a flag checked between statements (see
+	// checkInterrupt), so a job currently blocked here (e.g. `sleep 5` inside
+	// a backgrounded loop) would keep running until this command finished
+	// naturally on its own.
+	if sh.jobProc != nil {
+		sh.jobProc.add(c)
+		defer sh.jobProc.remove(c)
+	}
+
 	runErr := c.Wait()
 	close(cmdDone)
 	signal.Stop(sigCh)
@@ -1194,6 +1207,7 @@ func (sh *Shell) fork() *Shell {
 		lastExit:     sh.lastExit,
 		isBackground: sh.isBackground,
 		jobKill:      sh.jobKill,
+		jobProc:      sh.jobProc,
 	}
 	for k, v := range sh.vars {
 		child.vars[k] = v

@@ -28,6 +28,64 @@ type Job struct {
 
 	done chan struct{} // goroutine job only: closed when it finishes
 	kill *int32        // goroutine job only: set to 1 to request it stop
+
+	// procs tracks any real OS process CURRENTLY running as part of a
+	// goroutine job's execution tree (e.g. the `sleep` inside `(while true; do
+	// echo hi; sleep 5; done) &`). Killing the job needs to reach this too:
+	// the kill flag above is only noticed at the next checkInterrupt() poll,
+	// which happens between statements, not while the job is blocked inside a
+	// long-running external command -- without also killing that process
+	// directly, `kill %n` would silently wait for the current sleep/etc. to
+	// finish naturally before the job actually stopped.
+	procs *jobProcSet
+}
+
+// jobProcSet tracks the OS processes currently running as part of a goroutine
+// job's execution tree, so RequestStop can kill them immediately instead of
+// only setting the kill flag, which is checked between statements (see
+// checkInterrupt) and so would otherwise wait for whatever is currently
+// running to finish naturally. A set rather than a single slot because a job
+// can have more than one process running concurrently (e.g. a pipeline inside
+// the backgrounded construct).
+type jobProcSet struct {
+	mu    sync.Mutex
+	procs map[*exec.Cmd]struct{}
+}
+
+func newJobProcSet() *jobProcSet {
+	return &jobProcSet{procs: make(map[*exec.Cmd]struct{})}
+}
+
+func (s *jobProcSet) add(c *exec.Cmd) {
+	s.mu.Lock()
+	s.procs[c] = struct{}{}
+	s.mu.Unlock()
+}
+
+func (s *jobProcSet) remove(c *exec.Cmd) {
+	s.mu.Lock()
+	delete(s.procs, c)
+	s.mu.Unlock()
+}
+
+// killAll terminates every process currently tracked, taking a snapshot under
+// the lock first so killProcessTree (which can be slow, e.g. shelling out to
+// taskkill) doesn't run while holding it.
+func (s *jobProcSet) killAll() {
+	s.mu.Lock()
+	snapshot := make([]*exec.Cmd, 0, len(s.procs))
+	for c := range s.procs {
+		snapshot = append(snapshot, c)
+	}
+	s.mu.Unlock()
+	for _, c := range snapshot {
+		if c.Process == nil {
+			continue
+		}
+		if err := killProcessTree(c.Process.Pid); err != nil {
+			c.Process.Kill()
+		}
+	}
 }
 
 // IsProcess reports whether j is backed by a real OS process (as opposed to a
@@ -44,8 +102,12 @@ func (j *Job) Wait() {
 }
 
 // RequestStop asks the job to stop. For a process-backed job this sends sig;
-// for a goroutine job there is no real signal delivery available, so it always
-// just requests the job's loop/list unwind at its next check, matching Ctrl+C.
+// for a goroutine job there is no real signal delivery available, so it sets
+// the job's kill flag (checked between statements, same as Ctrl+C) AND
+// immediately kills any process currently running inside the job's execution
+// tree -- without the latter, a job blocked in a long-running external command
+// (e.g. `sleep 5` inside a backgrounded loop) would keep running until that
+// command finished naturally, only stopping the NEXT time around the loop.
 func (j *Job) RequestStop(sig os.Signal) error {
 	if j.Cmd != nil {
 		if err := killProcessTree(j.Cmd.Process.Pid); err == nil {
@@ -54,6 +116,9 @@ func (j *Job) RequestStop(sig os.Signal) error {
 		return j.Cmd.Process.Signal(sig)
 	}
 	atomic.StoreInt32(j.kill, 1)
+	if j.procs != nil {
+		j.procs.killAll()
+	}
 	return nil
 }
 
@@ -104,7 +169,7 @@ func (jt *JobTable) addGoroutine(desc string) (j *Job, finish func()) {
 	jt.mu.Lock()
 	defer jt.mu.Unlock()
 	kill := new(int32)
-	j = &Job{ID: jt.nextID(), Desc: desc, done: make(chan struct{}), kill: kill}
+	j = &Job{ID: jt.nextID(), Desc: desc, done: make(chan struct{}), kill: kill, procs: newJobProcSet()}
 	jt.jobs = append(jt.jobs, j)
 	fmt.Fprintf(os.Stderr, "[%d] %s\n", j.ID, desc)
 	return j, func() {
