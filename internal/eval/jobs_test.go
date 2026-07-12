@@ -7,6 +7,36 @@ import (
 	"time"
 )
 
+// TestBackgroundedPlainCommandRegistersJobSynchronously reproduces the race
+// reported after the two fixes above shipped: registering a process-backed Job
+// happened entirely inside the goroutine evalNode's background dispatch spawns
+// and returns 0 without waiting for at all, so a script with no delay between
+// `cmd &` and the very next statement (e.g. `sleep 3 &` then `jobs -l` on the
+// next line) could see an empty job list -- the goroutine simply hadn't been
+// scheduled yet. Unlike
+// TestBackgroundedPlainCommandStillUsesRealProcess below (which tolerates a
+// short poll, since it predates this fix), this asserts the job is visible the
+// INSTANT EvalString returns, with no retry loop at all -- proving the race is
+// actually closed, not just usually fast enough not to notice.
+func TestBackgroundedPlainCommandRegistersJobSynchronously(t *testing.T) {
+	sh := New("posh")
+	var buf bytes.Buffer
+	sh.Stdout, sh.Stderr = &buf, &buf
+
+	if code := sh.EvalString("sleep 3 &"); code != 0 {
+		t.Fatalf("backgrounding statement returned %d, want 0", code)
+	}
+
+	jobs := sh.jobs.list()
+	if len(jobs) != 1 {
+		t.Fatalf("jobs.list() immediately after EvalString = %d entries, want 1 (race not fixed)", len(jobs))
+	}
+	if !jobs[0].IsProcess() {
+		t.Fatal("expected a real process-backed job")
+	}
+	jobs[0].RequestStop(os.Kill) // clean up rather than waiting out the full sleep
+}
+
 // TestBackgroundedSubshellRegistersJob reproduces the reported bug: `(while
 // true; do ...; done) &` backgrounds a compound command (a subshell), which
 // spawns no OS process of its own -- evalNode's generic background dispatch

@@ -136,6 +136,44 @@ func TestParseForBraceBodyIncomplete(t *testing.T) {
 	}
 }
 
+// TestConsecutiveSeparatorsIsSyntaxError reproduces the reported bug: a
+// second separator immediately after the first -- e.g. `cmd &;` -- has no
+// command between them, which bash rejects as a syntax error ("syntax error
+// near unexpected token `;'"). Previously this was silently accepted as a
+// shorter, truncated list: parseCommandNode can't start a command with `;`,
+// so it returned (nil, nil), and the stray separator plus everything after it
+// was dropped with no error and no indication anything was wrong.
+func TestConsecutiveSeparatorsIsSyntaxError(t *testing.T) {
+	cases := []string{
+		"sleep 3 &; echo hi",
+		"echo a;; echo b",
+		"echo a && || echo b",
+		"echo a & & echo b",
+	}
+	for _, s := range cases {
+		if _, err := Parse(s); err == nil {
+			t.Errorf("Parse(%q) = nil error, want a syntax error", s)
+		} else if _, ok := err.(*ParseError); !ok {
+			t.Errorf("Parse(%q) error = %v (%T), want *ParseError", s, err, err)
+		}
+	}
+
+	// Legitimate single trailing separators, and normal single separators
+	// between two real commands, must still parse fine.
+	valid := []string{
+		"echo a &",
+		"echo a;",
+		"echo a; echo b",
+		"echo a && echo b",
+		"case x in x) echo one;; y) echo two;; esac",
+	}
+	for _, s := range valid {
+		if _, err := Parse(s); err != nil {
+			t.Errorf("Parse(%q) = error %v, want no error", s, err)
+		}
+	}
+}
+
 func TestParseWhileUntil(t *testing.T) {
 	if first(t, "while true; do echo x; done").(*WhileCmd).Until {
 		t.Fatalf("while parsed as until")

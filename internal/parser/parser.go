@@ -148,6 +148,25 @@ func (p *Parser) isListEnd(t lexer.Token) bool {
 	return t.Type == lexer.EOF || t.Type == lexer.RPAREN || t.Type == lexer.RBRACE || p.isStop(t)
 }
 
+// separatorText returns the shell punctuation for a list-separator token type
+// (;, &, &&, ||) and true, or ("", false) for anything else. Used to name the
+// unexpected token in a syntax error when two separators appear back to back
+// with no command between them.
+func separatorText(t lexer.TokenType) (string, bool) {
+	switch t {
+	case lexer.SEMI:
+		return ";", true
+	case lexer.AMP:
+		return "&", true
+	case lexer.AND:
+		return "&&", true
+	case lexer.OR:
+		return "||", true
+	default:
+		return "", false
+	}
+}
+
 // parseList is the top-level list parser; stops at EOF, RPAREN, RBRACE, or stop words.
 func (p *Parser) parseList() (Node, error) {
 	p.skipNewlines()
@@ -197,6 +216,17 @@ func (p *Parser) parseList() (Node, error) {
 		if p.isListEnd(t) {
 			list.Elems = append(list.Elems, ListElem{Op: op, Node: nil})
 			return list, nil
+		}
+		// A second separator immediately after the first -- `cmd &;`, `cmd ;;`
+		// (outside a case body), `cmd && ||` -- has no command between them,
+		// which bash rejects as a syntax error rather than silently accepting
+		// it as a shorter list. Without this check the stray separator (and
+		// everything after it) was previously dropped on the floor with no
+		// error at all: parseCommandNode can't start a command with e.g. `;`,
+		// so it returned (nil, nil), and the `if next == nil` case below just
+		// quietly returned the list built so far.
+		if sep, ok := separatorText(t.Type); ok {
+			return nil, &ParseError{fmt.Sprintf("syntax error near unexpected token `%s'", sep)}
 		}
 
 		next, err := p.parseCommandNode()

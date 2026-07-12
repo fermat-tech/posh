@@ -12,6 +12,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/fermat-tech/posh/internal/parser"
 )
@@ -96,6 +97,22 @@ type Shell struct {
 	// non-blocking, so the loop span at full speed with no real delay, firing
 	// off one leaked job per iteration.
 	backgroundLaunch bool
+
+	// bgReady is set alongside backgroundLaunch (never propagated by fork()).
+	// evalSimpleCmd closes it at each point where it has decided whether this
+	// backgrounded plain command will register a process-backed Job -- a
+	// builtin/function call (never registers one), command-not-found, or a
+	// successful/failed process Start()+jobs.add(). evalNode's background
+	// dispatch waits on it before returning, so a job that WILL be
+	// registered is guaranteed to be in the table by the time control
+	// reaches the next statement. Without this, registration happened
+	// entirely inside the spawned goroutine with no synchronization at all:
+	// a script with no delay between `cmd &` and the next line (e.g.
+	// `sleep 3 &; jobs -l`) could see an empty job list, since the goroutine
+	// might not have been scheduled yet. Builtins/functions still run
+	// asynchronously -- signaling ready happens right before invoking them,
+	// not after they finish.
+	bgReady chan struct{}
 
 	// I/O streams for this shell instance
 	Stdin  io.Reader
@@ -185,6 +202,16 @@ func (sh *Shell) ArrayNames() []string {
 	}
 	return names
 }
+// signalBgLaunchReady closes this shell's bgReady channel exactly once, if it
+// has one (see the field doc). Safe to call from multiple decision points in
+// evalSimpleCmd since it nils the field after closing.
+func (sh *Shell) signalBgLaunchReady() {
+	if sh.bgReady != nil {
+		close(sh.bgReady)
+		sh.bgReady = nil
+	}
+}
+
 func (sh *Shell) GetOpt(name string) bool   { return sh.opts[name] }
 func (sh *Shell) SetOpt(name string, val bool) {
 	if val {
@@ -470,8 +497,24 @@ func (sh *Shell) evalNode(n parser.Node, background bool) int {
 			// and nothing nested any deeper, is what should detach as its own
 			// OS process (see the backgroundLaunch field doc).
 			child.backgroundLaunch = true
+			ready := make(chan struct{})
+			child.bgReady = ready
 			// `exit` in a background job ends that job only.
 			go catchExit(func() int { return child.Eval(n) })
+			// Wait just long enough to know whether a job was registered (see
+			// bgReady's field doc) -- evalSimpleCmd signals this well before
+			// any actual blocking work (a builtin/function running, or a
+			// backgrounded process's own lifetime), so this does not turn
+			// backgrounding into something that blocks the caller. The
+			// timeout is a safety net for the handful of evalSimpleCmd paths
+			// that return early without signaling (a bare assignment with no
+			// command word, a redirection error, or a word that expanded to
+			// nothing) -- rare edge cases, not worth instrumenting every
+			// return statement for.
+			select {
+			case <-ready:
+			case <-time.After(2 * time.Second):
+			}
 			return 0
 		}
 
@@ -913,6 +956,16 @@ func (sh *Shell) evalSimpleCmd(cmd *parser.SimpleCmd, stdin io.Reader, stdout, s
 		if perr == nil && node != nil {
 			sub := sh.fork()
 			sub.Stdin, sub.Stdout, sub.Stderr = rStdin, rStdout, rStderr
+			// Neither backgroundLaunch nor bgReady propagates through fork()
+			// (see their field docs), but an aliased command stands in for the
+			// original one -- `runit &`, where runit is aliased to an external
+			// command, needs the same synchronous-registration handling
+			// `sleep 3 &` gets. Hand ownership to sub so it signals readiness
+			// instead of sh, which won't reach its own decision points at all
+			// now that this alias has taken over evaluation.
+			sub.backgroundLaunch = sh.backgroundLaunch
+			sub.bgReady = sh.bgReady
+			sh.bgReady = nil
 			// Carry any command-prefix assignments (e.g. `TZ=UTC date`) into the
 			// alias's environment so they reach the command it expands to, and
 			// export them so they reach child processes.
@@ -930,6 +983,10 @@ func (sh *Shell) evalSimpleCmd(cmd *parser.SimpleCmd, stdin io.Reader, stdout, s
 
 	// Built-in check
 	if bi, ok := builtins[name]; ok {
+		// A backgrounded builtin never registers a job (see the bgReady field
+		// doc), so signal readiness now rather than after it finishes -- it
+		// keeps running asynchronously, just untracked, exactly as before.
+		sh.signalBgLaunchReady()
 		code := bi(sh, words[1:], rStdin, rStdout, rStderr)
 		sh.lastExit = code
 		return code
@@ -937,6 +994,8 @@ func (sh *Shell) evalSimpleCmd(cmd *parser.SimpleCmd, stdin io.Reader, stdout, s
 
 	// Shell function check
 	if fn, ok := sh.funcs[name]; ok {
+		// A backgrounded function call never registers a job either; see above.
+		sh.signalBgLaunchReady()
 		code := sh.callFunc(fn, words[1:], cmd.Assigns...)
 		sh.lastExit = code
 		return code
@@ -945,6 +1004,7 @@ func (sh *Shell) evalSimpleCmd(cmd *parser.SimpleCmd, stdin io.Reader, stdout, s
 	// External command
 	resolvedPath, found := lookupCommand(name)
 	if !found {
+		sh.signalBgLaunchReady()
 		fmt.Fprintf(rStderr, "%s: %s: command not found\n", sh.name, name)
 		sh.lastExit = 127
 		return 127
@@ -992,10 +1052,17 @@ func (sh *Shell) evalSimpleCmd(cmd *parser.SimpleCmd, stdin io.Reader, stdout, s
 		// reach background jobs (matches bash job-control behavior).
 		setBackgroundAttrs(c)
 		if err := c.Start(); err != nil {
+			sh.signalBgLaunchReady()
 			fmt.Fprintf(rStderr, "%s: %v\n", sh.name, err)
 			return 1
 		}
 		sh.jobs.add(c, strings.Join(words, " "))
+		// Signal readiness only now that the job is actually in the table --
+		// this is the whole point: evalNode's background dispatch waits on
+		// this so the very next statement is guaranteed to see the job via
+		// `jobs -l`, `wait`, or `kill %n`, instead of racing the goroutine
+		// that got us here.
+		sh.signalBgLaunchReady()
 		return 0
 	}
 
