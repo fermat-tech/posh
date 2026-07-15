@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"math/rand"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -12,6 +13,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -138,7 +140,44 @@ type Shell struct {
 	TermOut    io.Writer
 	TermErr    io.Writer
 
+	// startTime is when this session began, for $SECONDS. Propagated through
+	// fork() so a subshell's $SECONDS keeps counting from the top-level
+	// session's start, matching bash rather than resetting to zero.
+	startTime time.Time
+	// secondsOffset lets SECONDS=n (see setVar) reset the elapsed counter
+	// without needing a real, mutable "now" reference; also propagated
+	// through fork().
+	secondsOffset int64
+
 	History []string
+}
+
+// cachedHostname and cachedExecutable memoize os.Hostname/os.Executable: both
+// are process-wide facts that never change between calls, but New() runs once
+// per Shell (once per subshell, once per test, ...), and the underlying
+// syscalls are not free -- calling them unconditionally on every Shell made
+// the whole test suite measurably slower, which was in turn shifting the
+// timing window on an already-flaky, unrelated external-process test. Compute
+// each at most once per process instead.
+var (
+	hostnameOnce sync.Once
+	hostnameVal  string
+	execOnce     sync.Once
+	execVal      string
+)
+
+func cachedHostname() string {
+	hostnameOnce.Do(func() {
+		hostnameVal, _ = os.Hostname()
+	})
+	return hostnameVal
+}
+
+func cachedExecutable() string {
+	execOnce.Do(func() {
+		execVal, _ = os.Executable()
+	})
+	return execVal
 }
 
 // New creates a Shell with the given name and inherits the OS environment.
@@ -173,6 +212,39 @@ func New(name string) *Shell {
 			sh.exported["HOME"] = true
 		}
 	}
+	// IFS is normally already set by whatever started this process (matching a
+	// login shell), but give it bash's default explicitly if not, so it's
+	// visible to `env`/`set` rather than only implicitly assumed by wordSplit.
+	if sh.vars["IFS"] == "" {
+		sh.vars["IFS"] = " \t\n"
+	}
+	// PWD, unlike most of the below, is also kept live by builtinCd on every
+	// `cd` -- this just seeds it at startup, matching bash.
+	if wd, err := os.Getwd(); err == nil {
+		sh.vars["PWD"] = wd
+	}
+	// USER/HOSTNAME/SHELL aren't standard Windows env vars (Windows sets
+	// USERNAME/COMPUTERNAME/ComSpec instead), so synthesize posh's own bash-name
+	// equivalents when the environment didn't already provide them.
+	if sh.vars["USER"] == "" {
+		if u := sh.vars["USERNAME"]; u != "" {
+			sh.vars["USER"] = u
+			sh.exported["USER"] = true
+		}
+	}
+	if sh.vars["HOSTNAME"] == "" {
+		if h := cachedHostname(); h != "" {
+			sh.vars["HOSTNAME"] = h
+			sh.exported["HOSTNAME"] = true
+		}
+	}
+	if sh.vars["SHELL"] == "" {
+		if exe := cachedExecutable(); exe != "" {
+			sh.vars["SHELL"] = exe
+			sh.exported["SHELL"] = true
+		}
+	}
+	sh.startTime = time.Now()
 	return sh
 }
 
@@ -223,7 +295,57 @@ func (sh *Shell) SetOpt(name string, val bool) {
 	}
 }
 
+// optFlags returns $-'s value: the bash single-letter mnemonic for each
+// currently-enabled `set -o` option that has one. vi/emacs/pipefail have no
+// single-letter form in bash either, so they're never reflected here even
+// when set. Bash's $- also includes flags for session-level state posh has
+// no equivalent of (interactive, job control, restricted, ...); those are
+// simply omitted rather than guessed at.
+func (sh *Shell) optFlags() string {
+	var sb strings.Builder
+	// Bash's own canonical order for the flags that have both a short letter
+	// and a `set -o` long name.
+	for _, o := range []struct{ name string; letter byte }{
+		{"errexit", 'e'},
+		{"noglob", 'f'},
+		{"nounset", 'u'},
+		{"verbose", 'v'},
+		{"xtrace", 'x'},
+	} {
+		if sh.opts[o.name] {
+			sb.WriteByte(o.letter)
+		}
+	}
+	return sb.String()
+}
+
+// DynamicVarNames lists the built-in variables getVar computes on the fly
+// (see there) rather than storing in sh.vars. Because they're never actually
+// present in that map, Vars() alone can never offer them -- callers that
+// enumerate variable names for a purpose other than a literal $VAR expansion
+// (e.g. tab completion) need to union this list in too, or these silently
+// never show up. Kept as the single source of truth so the two can't drift.
+var DynamicVarNames = []string{"RANDOM", "SECONDS", "POSHPID"}
+
 func (sh *Shell) getVar(name string) string {
+	// Dynamic variables: computed fresh on every reference rather than stored,
+	// so a plain sh.vars lookup would never see the right value. Checked before
+	// sh.vars so an assignment to one of these (e.g. RANDOM=5, mimicking bash's
+	// reseed) doesn't "freeze" it -- SECONDS is the one exception, handled via
+	// secondsOffset in setVar, since resetting the elapsed counter (SECONDS=0)
+	// is a common, useful idiom that RANDOM's reseed isn't worth matching here.
+	switch name {
+	case "RANDOM":
+		return strconv.Itoa(rand.Intn(32768))
+	case "SECONDS":
+		elapsed := int64(time.Since(sh.startTime).Seconds()) + sh.secondsOffset
+		return strconv.FormatInt(elapsed, 10)
+	case "POSHPID":
+		// Unlike bash's $BASHPID, this always equals $$ -- posh's ( ... )
+		// subshells run as an in-process goroutine, not a real forked OS
+		// process, so there is no separate PID for them to differ by.
+		return strconv.Itoa(os.Getpid())
+	}
 	if v, ok := sh.vars[name]; ok {
 		return v
 	}
@@ -235,6 +357,16 @@ func (sh *Shell) getVar(name string) string {
 }
 
 func (sh *Shell) setVar(name, val string) {
+	if name == "SECONDS" {
+		// SECONDS=n resets the elapsed counter to n, matching bash: future
+		// reads keep ticking up from there rather than jumping back to the
+		// real elapsed time. Silently ignored (as if unset) for a non-integer
+		// value, same as bash.
+		if n, err := strconv.ParseInt(val, 10, 64); err == nil {
+			sh.secondsOffset = n - int64(time.Since(sh.startTime).Seconds())
+		}
+		return
+	}
 	sh.vars[name] = val
 }
 
@@ -514,6 +646,14 @@ func (sh *Shell) evalNode(n parser.Node, background bool) int {
 			child.backgroundLaunch = true
 			ready := make(chan struct{})
 			child.bgReady = ready
+			// child is a forked copy -- child.vars is its own map, never the
+			// same one sh.vars is, so anything evalSimpleCmd sets on child
+			// (e.g. $_) is invisible to sh once this goroutine returns. $!
+			// must land on sh (the shell that keeps running the rest of the
+			// list), so capture it here instead: jobs are shared through the
+			// same *JobTable (see fork()), so after the wait below, whatever
+			// was JUST added is readable from sh.jobs.list() directly.
+			before := len(sh.jobs.list())
 			// `exit` in a background job ends that job only.
 			go catchExit(func() int { return child.Eval(n) })
 			// Wait just long enough to know whether a job was registered (see
@@ -530,12 +670,22 @@ func (sh *Shell) evalNode(n parser.Node, background bool) int {
 			case <-ready:
 			case <-time.After(2 * time.Second):
 			}
+			if jobs := sh.jobs.list(); len(jobs) > before {
+				if last := jobs[len(jobs)-1]; last.IsProcess() {
+					sh.vars["!"] = strconv.Itoa(last.Cmd.Process.Pid)
+				}
+			}
 			return 0
 		}
 
 		job, finish := sh.jobs.addGoroutine(describeNode(n))
 		child.jobKill = job.kill
 		child.jobProc = job.procs
+		// Unlike a plain backgrounded command, a backgrounded compound
+		// command has no real OS process of its own, so there is no PID for
+		// $! to hold -- clear it rather than leave a stale value from
+		// whatever was last backgrounded before this.
+		sh.vars["!"] = ""
 		go func() {
 			defer finish()
 			catchExit(func() int { return child.Eval(n) })
@@ -949,6 +1099,10 @@ func (sh *Shell) evalSimpleCmd(cmd *parser.SimpleCmd, stdin io.Reader, stdout, s
 	if len(words) == 0 {
 		return 0
 	}
+	// $_ -- the last word of the command about to run, matching bash (it
+	// becomes "the previous command's last argument" once THIS command
+	// finishes and the next one looks it up).
+	sh.vars["_"] = words[len(words)-1]
 
 	// Build the inline environment from the exported variables plus the
 	// command-prefix assignments.
@@ -1222,6 +1376,8 @@ func (sh *Shell) fork() *Shell {
 		isBackground: sh.isBackground,
 		jobKill:      sh.jobKill,
 		jobProc:      sh.jobProc,
+		startTime:      sh.startTime,
+		secondsOffset:  sh.secondsOffset,
 	}
 	for k, v := range sh.vars {
 		child.vars[k] = v

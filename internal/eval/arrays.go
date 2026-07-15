@@ -244,11 +244,14 @@ func (sh *Shell) applyAssign(a string) {
 		return
 	}
 
-	// Plain scalar.
+	// Plain scalar. Routed through setVar (not a direct sh.vars write) so
+	// SECONDS=n is actually observed -- getVar computes SECONDS dynamically
+	// and never consults sh.vars for it, so a direct write here would be
+	// silently invisible.
 	if ap.append {
-		sh.vars[ap.name] = sh.vars[ap.name] + val
+		sh.setVar(ap.name, sh.getVar(ap.name)+val)
 	} else {
-		sh.vars[ap.name] = val
+		sh.setVar(ap.name, val)
 	}
 }
 

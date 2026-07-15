@@ -452,6 +452,15 @@ func (c *poshCompleter) varCandidates(prefix string) []string {
 			out = append(out, "$"+k)
 		}
 	}
+	// Built-ins like $RANDOM/$SECONDS/$POSHPID are computed on the fly (see
+	// eval.DynamicVarNames) and never actually stored in Vars(), so without
+	// this they never show up in completion at all.
+	for _, k := range eval.DynamicVarNames {
+		if strings.HasPrefix(strings.ToLower(k), varPrefix) && !seen[k] {
+			seen[k] = true
+			out = append(out, "$"+k)
+		}
+	}
 	// Also include exported OS env vars
 	for _, kv := range os.Environ() {
 		k := strings.SplitN(kv, "=", 2)[0]

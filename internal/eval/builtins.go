@@ -115,23 +115,40 @@ func builtinClear(_ *Shell, _ []string, _ io.Reader, _ io.Writer, _ io.Writer) i
 
 // ---- cd, pwd ----
 
-func builtinCd(sh *Shell, args []string, _ io.Reader, _, stderr io.Writer) int {
+func builtinCd(sh *Shell, args []string, _ io.Reader, stdout, stderr io.Writer) int {
 	var dir string
+	printDir := false
 	switch len(args) {
 	case 0:
 		dir = sh.homeDir()
 	case 1:
-		dir = args[0]
+		if args[0] == "-" {
+			// cd - : go to $OLDPWD and print the resulting directory, matching
+			// bash. Errors if OLDPWD was never set (no prior cd this session).
+			dir = sh.getVar("OLDPWD")
+			if dir == "" {
+				fmt.Fprintf(stderr, "cd: OLDPWD not set\n")
+				return 1
+			}
+			printDir = true
+		} else {
+			dir = args[0]
+		}
 	default:
 		fmt.Fprintf(stderr, "cd: too many arguments\n")
 		return 1
 	}
+	oldWD, _ := os.Getwd()
 	if err := os.Chdir(dir); err != nil {
 		fmt.Fprintf(stderr, "cd: %v\n", err)
 		return 1
 	}
 	wd, _ := os.Getwd()
+	sh.setVar("OLDPWD", oldWD)
 	sh.setVar("PWD", wd)
+	if printDir {
+		fmt.Fprintln(stdout, wd)
+	}
 	return 0
 }
 

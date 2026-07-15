@@ -400,6 +400,12 @@ func (sh *Shell) expandDollar(runes []rune, i int) (string, int) {
 	case '#':
 		return strconv.Itoa(len(sh.posParams)), 2
 
+	case '-':
+		return sh.optFlags(), 2
+
+	case '!':
+		return sh.getVar("!"), 2
+
 	case '1', '2', '3', '4', '5', '6', '7', '8', '9':
 		idx := int(next-'1')
 		if idx < len(sh.posParams) {
