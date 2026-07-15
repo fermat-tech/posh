@@ -12,6 +12,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/fermat-tech/posh/internal/parser"
@@ -383,6 +384,19 @@ func (sh *Shell) EvalString(s string) int {
 // must keep propagating past this point untouched, so a top-level `exit`
 // still ends the session rather than being absorbed here alongside interrupts.
 func (sh *Shell) EvalStringAt(s string, lineBase int) (code int) {
+	// Clear any stale interrupt from before this command started. WatchInterrupts
+	// is a persistent, process-wide handler: pressing Ctrl+C just to abort or
+	// retype a botched command line at the prompt (handled separately by the
+	// line editor) ALSO sets this flag, since it fires on every Ctrl+C whether
+	// or not a command is running. Left uncleared, that stale flag would be
+	// silently consumed by the next checkInterrupt() call in the NEXT command --
+	// which could be an unrelated, later statement in a `;`-list (e.g. `cd
+	// ..;p`), dropping it with no error at all. A real Ctrl+C during THIS
+	// command's own execution still takes effect normally, since checkInterrupt
+	// is polled throughout, not just here.
+	if !sh.isBackground {
+		atomic.StoreInt32(&interrupted, 0)
+	}
 	defer func() {
 		if r := recover(); r != nil {
 			if _, ok := r.(shellInterrupt); ok {

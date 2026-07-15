@@ -48,6 +48,35 @@ func TestInterruptStopsForegroundLoop(t *testing.T) {
 	}
 }
 
+// TestStaleInterruptDoesNotAffectNextCommand reproduces the reported bug:
+// `cd ..;p` occasionally ran `cd ..` but silently never printed p's output
+// (p aliased to pwd), with no error at all. WatchInterrupts' signal handler is
+// persistent and process-wide, so pressing Ctrl+C just to abort or retype a
+// botched command line at the prompt (handled separately by the line editor)
+// ALSO sets this flag -- it fires on every Ctrl+C whether or not a command is
+// running. Left uncleared, that stale flag was silently consumed by the next
+// checkInterrupt() call in the NEXT command's evalList, which could land on an
+// unrelated LATER statement in a `;`-list, dropping it with no error shown.
+// EvalStringAt must clear any pre-existing flag before a new top-level command
+// starts, so only a Ctrl+C during THIS command's own execution takes effect.
+func TestStaleInterruptDoesNotAffectNextCommand(t *testing.T) {
+	sh := New("posh")
+	var buf bytes.Buffer
+	sh.Stdout, sh.Stderr = &buf, &buf
+
+	// Simulate: the user pressed Ctrl+C moments ago, e.g. to abort typing an
+	// unrelated command, well before this one was ever run.
+	atomic.StoreInt32(&interrupted, 1)
+	defer atomic.StoreInt32(&interrupted, 0)
+
+	if code := sh.EvalString("echo first; echo second"); code != 0 {
+		t.Fatalf("code = %d, want 0 (stale interrupt should not affect a new command)", code)
+	}
+	if got := buf.String(); got != "first\nsecond\n" {
+		t.Fatalf("output = %q, want both statements to run", got)
+	}
+}
+
 // TestInterruptDoesNotAffectBackgroundJob mirrors bash's job control: a
 // foreground Ctrl+C must not stop a job already running in the background.
 func TestInterruptDoesNotAffectBackgroundJob(t *testing.T) {
