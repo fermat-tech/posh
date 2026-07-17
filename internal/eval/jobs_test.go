@@ -1,7 +1,6 @@
 package eval
 
 import (
-	"bytes"
 	"os"
 	"testing"
 	"time"
@@ -20,8 +19,8 @@ import (
 // actually closed, not just usually fast enough not to notice.
 func TestBackgroundedPlainCommandRegistersJobSynchronously(t *testing.T) {
 	sh := New("posh")
-	var buf bytes.Buffer
-	sh.Stdout, sh.Stderr = &buf, &buf
+	buf := &syncBuf{}
+	sh.Stdout, sh.Stderr = buf, buf
 
 	if code := sh.EvalString("sleep 3 &"); code != 0 {
 		t.Fatalf("backgrounding statement returned %d, want 0", code)
@@ -46,8 +45,8 @@ func TestBackgroundedPlainCommandRegistersJobSynchronously(t *testing.T) {
 // cancel.
 func TestBackgroundedSubshellRegistersJob(t *testing.T) {
 	sh := New("posh")
-	var buf bytes.Buffer
-	sh.Stdout, sh.Stderr = &buf, &buf
+	buf := &syncBuf{}
+	sh.Stdout, sh.Stderr = buf, buf
 
 	done := make(chan int, 1)
 	go func() { done <- sh.EvalString("(while true; do :; done) &") }()
@@ -103,8 +102,8 @@ func TestBackgroundedSubshellRegistersJob(t *testing.T) {
 // seconds (or however long is left) later.
 func TestKillStopsJobImmediatelyEvenMidSleep(t *testing.T) {
 	sh := New("posh")
-	var buf bytes.Buffer
-	sh.Stdout, sh.Stderr = &buf, &buf
+	buf := &syncBuf{}
+	sh.Stdout, sh.Stderr = buf, buf
 
 	done := make(chan int, 1)
 	go func() {
@@ -159,8 +158,8 @@ func TestKillStopsJobImmediatelyEvenMidSleep(t *testing.T) {
 // before deciding a node is "just a plain command".
 func TestBackgroundedPlainCommandStillUsesRealProcess(t *testing.T) {
 	sh := New("posh")
-	var buf bytes.Buffer
-	sh.Stdout, sh.Stderr = &buf, &buf
+	buf := &syncBuf{}
+	sh.Stdout, sh.Stderr = buf, buf
 
 	done := make(chan int, 1)
 	go func() { done <- sh.EvalString("sleep 2 &") }()

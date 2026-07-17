@@ -1,7 +1,6 @@
 package eval
 
 import (
-	"bytes"
 	"strconv"
 	"strings"
 	"testing"
@@ -32,8 +31,8 @@ func TestOptFlagsVar(t *testing.T) {
 // which has no real OS process) must leave it empty rather than stale.
 func TestBackgroundPIDVar(t *testing.T) {
 	sh := New("posh")
-	var buf bytes.Buffer
-	sh.Stdout, sh.Stderr = &buf, &buf
+	buf := &syncBuf{}
+	sh.Stdout, sh.Stderr = buf, buf
 
 	if code := sh.EvalString("sleep 2 &"); code != 0 {
 		t.Fatalf("backgrounding statement returned %d, want 0", code)
@@ -152,9 +151,9 @@ func TestSynthesizedEnvVars(t *testing.T) {
 // one, for tests that need to observe state (PWD, OLDPWD, ...) across calls.
 func eval2(sh *Shell, t *testing.T, src string) string {
 	t.Helper()
-	var buf bytes.Buffer
-	sh.Stdout = &buf
-	sh.Stderr = &buf
+	buf := &syncBuf{}
+	sh.Stdout = buf
+	sh.Stderr = buf
 	sh.EvalString(src)
 	out := strings.ReplaceAll(buf.String(), "\r", "")
 	return strings.TrimRight(out, "\n")

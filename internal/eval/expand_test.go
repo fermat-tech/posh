@@ -3,8 +3,49 @@ package eval
 import (
 	"bytes"
 	"strings"
+	"sync"
 	"testing"
 )
+
+// syncBuf collects a shell's stdout and stderr as one interleaved stream.
+//
+// It deliberately wraps bytes.Buffer rather than exposing one, because a bare
+// *bytes.Buffer silently loses output here. A pipeline stage running an external
+// command hands that child's stderr to Go's exec, which drains it with
+// io.Copy on a goroutine of its own. io.Copy prefers an io.ReaderFrom, and
+// bytes.Buffer.ReadFrom re-slices the buffer: it notes the length on entry,
+// blocks until the child's stderr reaches EOF, then truncates back to
+// (entry length + bytes read). A quiet child reads zero, so that final
+// b.buf[:i+0] discards everything a concurrent stage appended in between --
+// `cat file | while read line; do echo "$line"; done` came back empty. Since
+// syncBuf has no ReadFrom, io.Copy falls back to a plain loop that only ever
+// calls Write, and the mutex keeps those writes from racing each other.
+//
+// Assign the same *syncBuf to both Shell.Stdout and Shell.Stderr rather than two
+// wrappers over one buffer: exec documents that when Stdout and Stderr are the
+// same writer, at most one goroutine writes to it at a time.
+type syncBuf struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (s *syncBuf) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.buf.Write(p)
+}
+
+func (s *syncBuf) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.buf.String()
+}
+
+func (s *syncBuf) Reset() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.buf.Reset()
+}
 
 // eval runs src in a fresh shell and returns its stdout with the trailing
 // newline removed. All carriage returns are stripped so results don't depend on
@@ -15,9 +56,9 @@ import (
 func eval(t *testing.T, src string) string {
 	t.Helper()
 	sh := New("posh")
-	var buf bytes.Buffer
-	sh.Stdout = &buf
-	sh.Stderr = &buf
+	buf := &syncBuf{}
+	sh.Stdout = buf
+	sh.Stderr = buf
 	sh.EvalString(src)
 	out := strings.ReplaceAll(buf.String(), "\r", "")
 	return strings.TrimRight(out, "\n")
@@ -26,9 +67,9 @@ func eval(t *testing.T, src string) string {
 // evalRaw runs src in the given shell and returns stdout verbatim (no trimming),
 // for tests that care about exact whitespace such as `echo -n`.
 func evalRaw(sh *Shell, src string) string {
-	var buf bytes.Buffer
-	sh.Stdout = &buf
-	sh.Stderr = &buf
+	buf := &syncBuf{}
+	sh.Stdout = buf
+	sh.Stderr = buf
 	sh.EvalString(src)
 	return buf.String()
 }

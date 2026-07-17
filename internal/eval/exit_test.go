@@ -1,7 +1,6 @@
 package eval
 
 import (
-	"bytes"
 	"strings"
 	"testing"
 )
@@ -12,9 +11,9 @@ import (
 func run(t *testing.T, src string) (out string, code int, exited bool) {
 	t.Helper()
 	sh := New("posh")
-	var buf bytes.Buffer
-	sh.Stdout = &buf
-	sh.Stderr = &buf
+	buf := &syncBuf{}
+	sh.Stdout = buf
+	sh.Stderr = buf
 
 	defer func() {
 		if r := recover(); r != nil {

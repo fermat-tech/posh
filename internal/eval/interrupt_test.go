@@ -1,7 +1,6 @@
 package eval
 
 import (
-	"bytes"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -29,8 +28,8 @@ func TestInterruptStopsForegroundLoop(t *testing.T) {
 	defer atomic.StoreInt32(&interrupted, 0)
 
 	sh := New("posh")
-	var buf bytes.Buffer
-	sh.Stdout, sh.Stderr = &buf, &buf
+	buf := &syncBuf{}
+	sh.Stdout, sh.Stderr = buf, buf
 
 	done := make(chan int, 1)
 	go func() { done <- sh.EvalString("while true; do :; done") }()
@@ -61,8 +60,8 @@ func TestInterruptStopsForegroundLoop(t *testing.T) {
 // starts, so only a Ctrl+C during THIS command's own execution takes effect.
 func TestStaleInterruptDoesNotAffectNextCommand(t *testing.T) {
 	sh := New("posh")
-	var buf bytes.Buffer
-	sh.Stdout, sh.Stderr = &buf, &buf
+	buf := &syncBuf{}
+	sh.Stdout, sh.Stderr = buf, buf
 
 	// Simulate: the user pressed Ctrl+C moments ago, e.g. to abort typing an
 	// unrelated command, well before this one was ever run.
@@ -88,8 +87,8 @@ func TestInterruptDoesNotAffectBackgroundJob(t *testing.T) {
 	defer atomic.StoreInt32(&interrupted, 0)
 
 	sh := New("posh")
-	var buf bytes.Buffer
-	sh.Stdout, sh.Stderr = &buf, &buf
+	buf := &syncBuf{}
+	sh.Stdout, sh.Stderr = buf, buf
 
 	done := make(chan int, 1)
 	go func() {
