@@ -275,6 +275,15 @@ func (p *Parser) parseCommandNode() (Node, error) {
 		return p.maybeWrapInPipeline(node)
 	}
 
+	// Conditional command [[ expression ]]
+	if t.Type == lexer.DLBRACKET {
+		node, err := p.parseCondCmd()
+		if err != nil || node == nil {
+			return node, err
+		}
+		return p.maybeWrapInPipeline(node)
+	}
+
 	// Compound commands and function definitions
 	if t.Type == lexer.WORD {
 		// Function definition: NAME () { ... }
@@ -712,6 +721,162 @@ func (p *Parser) parseCaseCmd() (*CaseCmd, error) {
 
 	cmd.Redirs = p.parseRedirs()
 	return cmd, nil
+}
+
+// ---- [[ expression ]] conditional command ----
+
+// condUnaryOps are bash's [[ ]] unary test operators (bash(1), CONDITIONAL
+// EXPRESSIONS). Recognized by word value, since [[ ]] operands are ordinary
+// WORD tokens, not a distinct operator token type.
+var condUnaryOps = map[string]bool{
+	"-a": true, "-b": true, "-c": true, "-d": true, "-e": true, "-f": true,
+	"-g": true, "-h": true, "-k": true, "-L": true, "-n": true, "-N": true,
+	"-o": true, "-O": true, "-p": true, "-r": true, "-s": true, "-S": true,
+	"-t": true, "-u": true, "-v": true, "-w": true, "-x": true, "-z": true,
+	"-G": true,
+}
+
+// condBinaryOps are bash's [[ ]] binary test operators.
+var condBinaryOps = map[string]bool{
+	"=": true, "==": true, "!=": true, "=~": true, "<": true, ">": true,
+	"-eq": true, "-ne": true, "-lt": true, "-le": true, "-gt": true, "-ge": true,
+	"-nt": true, "-ot": true, "-ef": true,
+}
+
+// parseCondCmd parses a [[ expression ]] conditional command. The opening
+// [[ has already been peeked (not consumed) by parseCommandNode.
+func (p *Parser) parseCondCmd() (*CondCmd, error) {
+	p.consumeNonNL() // '[['
+	expr, err := p.parseCondOr()
+	if err != nil {
+		return nil, err
+	}
+	t := p.peek()
+	if t.Type == lexer.EOF {
+		return nil, ErrIncomplete
+	}
+	if t.Type != lexer.RDLBRACKET {
+		return nil, &ParseError{fmt.Sprintf("syntax error in conditional expression near %q", t.Val)}
+	}
+	p.consumeNonNL() // ']]'
+	cmd := &CondCmd{Expr: expr}
+	cmd.Redirs = p.parseRedirs()
+	return cmd, nil
+}
+
+// parseCondOr handles || (lowest precedence within [[ ]]).
+func (p *Parser) parseCondOr() (CondNode, error) {
+	left, err := p.parseCondAnd()
+	if err != nil {
+		return nil, err
+	}
+	for p.peek().Type == lexer.OR {
+		p.consumeNonNL()
+		right, err := p.parseCondAnd()
+		if err != nil {
+			return nil, err
+		}
+		left = &CondOr{L: left, R: right}
+	}
+	return left, nil
+}
+
+// parseCondAnd handles && (binds tighter than ||, looser than ! and tests).
+func (p *Parser) parseCondAnd() (CondNode, error) {
+	left, err := p.parseCondUnary()
+	if err != nil {
+		return nil, err
+	}
+	for p.peek().Type == lexer.AND {
+		p.consumeNonNL()
+		right, err := p.parseCondUnary()
+		if err != nil {
+			return nil, err
+		}
+		left = &CondAnd{L: left, R: right}
+	}
+	return left, nil
+}
+
+// parseCondUnary handles a leading ! (binds to the single following term, not
+// to a whole && chain -- ! -f a && -f b means (! -f a) && (-f b)).
+func (p *Parser) parseCondUnary() (CondNode, error) {
+	t := p.peek()
+	if t.Type == lexer.WORD && t.Val == "!" {
+		p.consumeNonNL()
+		x, err := p.parseCondUnary()
+		if err != nil {
+			return nil, err
+		}
+		return &CondNot{X: x}, nil
+	}
+	return p.parseCondPrimary()
+}
+
+// parseCondPrimary handles ( expr ) grouping, else falls through to a leaf test.
+func (p *Parser) parseCondPrimary() (CondNode, error) {
+	t := p.peek()
+	if t.Type == lexer.EOF {
+		return nil, ErrIncomplete
+	}
+	if t.Type == lexer.LPAREN {
+		p.consumeNonNL()
+		inner, err := p.parseCondOr()
+		if err != nil {
+			return nil, err
+		}
+		t = p.peek()
+		if t.Type == lexer.EOF {
+			return nil, ErrIncomplete
+		}
+		if t.Type != lexer.RPAREN {
+			return nil, &ParseError{"syntax error in conditional expression: expected )"}
+		}
+		p.consumeNonNL()
+		return &CondGroup{X: inner}, nil
+	}
+	return p.parseCondTest()
+}
+
+// parseCondTest reads a single leaf test: OP WORD (unary), WORD OP WORD
+// (binary), or a bare WORD (true if it expands non-empty). Args are stored
+// unexpanded (as SimpleCmd.Words are); the evaluator expands each one
+// individually and does not word-split or glob-expand them.
+func (p *Parser) parseCondTest() (CondNode, error) {
+	t := p.peek()
+	if t.Type == lexer.EOF {
+		return nil, ErrIncomplete
+	}
+	if t.Type != lexer.WORD {
+		return nil, &ParseError{fmt.Sprintf("syntax error in conditional expression near %q", t.Type)}
+	}
+
+	if condUnaryOps[t.Val] {
+		op := p.consumeNonNL().Val
+		argTok := p.peek()
+		if argTok.Type == lexer.EOF {
+			return nil, ErrIncomplete
+		}
+		if argTok.Type != lexer.WORD {
+			return nil, &ParseError{fmt.Sprintf("syntax error in conditional expression: %s requires an operand", op)}
+		}
+		return &CondTest{Op: op, Args: []string{p.consumeNonNL().Val}}, nil
+	}
+
+	lhs := p.consumeNonNL().Val
+	t = p.peek()
+	if t.Type == lexer.WORD && condBinaryOps[t.Val] {
+		op := p.consumeNonNL().Val
+		rhsTok := p.peek()
+		if rhsTok.Type == lexer.EOF {
+			return nil, ErrIncomplete
+		}
+		if rhsTok.Type != lexer.WORD {
+			return nil, &ParseError{fmt.Sprintf("syntax error in conditional expression: %s requires a right-hand operand", op)}
+		}
+		return &CondTest{Op: op, Args: []string{lhs, p.consumeNonNL().Val}}, nil
+	}
+	return &CondTest{Args: []string{lhs}}, nil
 }
 
 func (p *Parser) parseFuncDefShort() (*FuncDef, error) {

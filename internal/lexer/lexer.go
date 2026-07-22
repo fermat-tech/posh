@@ -42,6 +42,8 @@ const (
 	LBRACE                            // {
 	RBRACE                            // }
 	DLARITH                           // (( arithmetic command ))
+	DLBRACKET                         // [[  (conditional expression)
+	RDLBRACKET                        // ]]
 	NEWLINE                           // \n
 	EOF
 )
@@ -108,6 +110,10 @@ func (t TokenType) String() string {
 		return "}"
 	case DLARITH:
 		return "(("
+	case DLBRACKET:
+		return "[["
+	case RDLBRACKET:
+		return "]]"
 	case NEWLINE:
 		return "NEWLINE"
 	case EOF:
@@ -145,6 +151,19 @@ type Lexer struct {
 	// resolves — since it usually indicates the user pressed Enter by mistake
 	// rather than intending a multi-line quoted value.
 	MidWordQuoteBreak bool
+
+	// bracketDepth counts nested [[ ]] conditional commands. While > 0, < and >
+	// are ordinary string-comparison words rather than redirect operators,
+	// matching bash's [[ ]] rule that they need not be quoted for use there.
+	bracketDepth int
+
+	// regexOperandNext is set right after reading a bare "=~" word inside
+	// [[ ]], and consumed by the very next word read (see readWordMode). Bash
+	// relaxes ( ) and | specifically for the pattern operand following =~ --
+	// but not other operators like == -- so an unquoted regex with capture
+	// groups or alternation (e.g. [[ $x =~ ^(a|b)$ ]]) can be written the same
+	// way bash accepts it, without needing to quote it.
+	regexOperandNext bool
 }
 
 // New creates a Lexer for the given input string.
@@ -171,6 +190,12 @@ func (l *Lexer) peekAt(offset int) (rune, bool) {
 		return 0, false
 	}
 	return l.input[i], true
+}
+
+// isRune reports whether the rune at the given lookahead offset equals want.
+func isRune(l *Lexer, offset int, want rune) bool {
+	r, ok := l.peekAt(offset)
+	return ok && r == want
 }
 
 func (l *Lexer) advance() rune {
@@ -272,6 +297,40 @@ func (l *Lexer) Tokenize() []Token {
 			l.advance()
 			tokens = append(tokens, Token{Type: RPAREN})
 			wordPos = false
+
+		case ch == '[' && isRune(l, 1, '['):
+			// [[ conditional command — only when standalone (followed by
+			// whitespace/EOF), matching how { and (( are recognized. Otherwise
+			// (e.g. a glob bracket expression like [[:alpha:]] used as a plain
+			// word) it falls through to readWord below like an ordinary `[`.
+			if next, hasNext := l.peekAt(2); !hasNext || next == ' ' || next == '\t' || next == '\r' || next == '\n' {
+				l.advance()
+				l.advance()
+				tokens = append(tokens, Token{Type: DLBRACKET})
+				l.bracketDepth++
+				wordPos = true
+				break
+			}
+			w := l.readWord()
+			tokens = append(tokens, Token{Type: WORD, Val: w})
+			wordPos = true
+
+		case ch == ']' && l.bracketDepth > 0 && isRune(l, 1, ']'):
+			l.advance()
+			l.advance()
+			tokens = append(tokens, Token{Type: RDLBRACKET})
+			l.bracketDepth--
+			l.regexOperandNext = false
+			wordPos = false
+
+		case (ch == '<' || ch == '>') && l.bracketDepth > 0:
+			// Inside [[ ]], < and > are string-comparison operators, not
+			// redirections, and need not be quoted (bash). readWord would stop
+			// immediately at either (see isWordStop), so emit each as its own
+			// single-character WORD directly instead of falling through to it.
+			l.advance()
+			tokens = append(tokens, Token{Type: WORD, Val: string(ch)})
+			wordPos = true
 
 		case ch == '{':
 			// Emit LBRACE only when { is standalone (followed by whitespace/EOF).
@@ -466,7 +525,8 @@ func (l *Lexer) Tokenize() []Token {
 				}
 			}
 
-			w := l.readWord()
+			w := l.readWordMode(l.regexOperandNext)
+			l.regexOperandNext = l.bracketDepth > 0 && w == "=~"
 			if isAssignment(w) {
 				w = l.glueArrayLiteral(w)
 				if wordPos {
@@ -605,13 +665,22 @@ const protectedSingleQuote rune = 0xE00B // prevents single-quote stripping in e
 const arrayElemSep rune = 0xE020
 
 func (l *Lexer) readWord() string {
+	return l.readWordMode(false)
+}
+
+// readWordMode reads a word; when regexMode is true, ( ) and | do not stop
+// the word (see regexOperandNext for why: bash relaxes exactly these three
+// characters -- but not others like & or ; -- for the pattern operand
+// immediately following =~ inside [[ ]], letting a regex with capture groups
+// or alternation be written unquoted).
+func (l *Lexer) readWordMode(regexMode bool) string {
 	var sb strings.Builder
 	for {
 		ch, ok := l.peek()
 		if !ok {
 			break
 		}
-		if isWordStop(ch) {
+		if isWordStop(ch) && !(regexMode && (ch == '(' || ch == ')' || ch == '|')) {
 			break
 		}
 		switch ch {

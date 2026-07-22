@@ -152,3 +152,61 @@ type ArithCmd struct {
 }
 
 func (*ArithCmd) nodeTag() {}
+
+// ---- [[ expression ]] conditional command ----
+
+// CondNode is a node within a [[ ]] expression tree: a boolean combinator
+// (CondAnd/CondOr/CondNot/CondGroup) or a leaf test (CondTest).
+type CondNode interface {
+	Node
+	condTag()
+}
+
+// CondCmd is a [[ expression ]] conditional command. Unlike test/[, it is
+// parsed as its own grammar (not a SimpleCmd with word arguments): no word
+// splitting or pathname expansion happens on its operands, < and > are string
+// comparison operators rather than redirections, and &&/||/!/( ) combine
+// sub-tests directly within the expression instead of at the shell list level.
+type CondCmd struct {
+	Expr   CondNode
+	Redirs []Redir
+}
+
+func (*CondCmd) nodeTag() {}
+
+// CondOr is Expr = L || R (evaluated left to right; R only if L is false).
+type CondOr struct{ L, R CondNode }
+
+func (*CondOr) nodeTag() {}
+func (*CondOr) condTag() {}
+
+// CondAnd is Expr = L && R (evaluated left to right; R only if L is true).
+type CondAnd struct{ L, R CondNode }
+
+func (*CondAnd) nodeTag() {}
+func (*CondAnd) condTag() {}
+
+// CondNot is Expr = ! X.
+type CondNot struct{ X CondNode }
+
+func (*CondNot) nodeTag() {}
+func (*CondNot) condTag() {}
+
+// CondGroup is Expr = ( X ), grouping for precedence.
+type CondGroup struct{ X CondNode }
+
+func (*CondGroup) nodeTag() {}
+func (*CondGroup) condTag() {}
+
+// CondTest is a leaf test: a unary test (Op + Args[0], e.g. -f FILE), a binary
+// test (Args[0] Op Args[1], e.g. STR1 == STR2 or NUM1 -eq NUM2), or a bare
+// word test (Op == "", Args[0] non-empty). Args are raw, unexpanded word text
+// (as SimpleCmd.Words are) -- the evaluator expands each individually and does
+// not word-split or glob-expand them, matching bash's [[ ]] semantics.
+type CondTest struct {
+	Op   string
+	Args []string
+}
+
+func (*CondTest) nodeTag() {}
+func (*CondTest) condTag() {}

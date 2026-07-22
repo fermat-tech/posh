@@ -136,6 +136,44 @@ func TestParseForBraceBodyIncomplete(t *testing.T) {
 	}
 }
 
+func TestParseCondCmd(t *testing.T) {
+	// A well-formed [[ ]] parses to a *CondCmd (possibly through a Pipeline
+	// wrapper if maybeWrapInPipeline applied, so just check it parses cleanly).
+	if _, err := Parse("[[ -f a.txt ]]"); err != nil {
+		t.Fatalf("Parse simple [[ ]] = %v", err)
+	}
+	if _, err := Parse("[[ $a == $b ]]"); err != nil {
+		t.Fatalf("Parse [[ == ]] = %v", err)
+	}
+	if _, err := Parse("[[ -f a && -f b || -f c ]]"); err != nil {
+		t.Fatalf("Parse [[ ]] with && || = %v", err)
+	}
+	if _, err := Parse("[[ ! ( -f a && -f b ) ]]"); err != nil {
+		t.Fatalf("Parse [[ ]] with ! and grouping = %v", err)
+	}
+	if _, err := Parse(`[[ "$a" =~ ^foo ]]`); err != nil {
+		t.Fatalf("Parse [[ =~ ]] = %v", err)
+	}
+
+	// An unterminated [[ ]] must report ErrIncomplete (so the REPL keeps
+	// reading), matching every other compound command.
+	if _, err := Parse("[[ -f a.txt"); err != ErrIncomplete {
+		t.Fatalf("want ErrIncomplete for unterminated [[, got %v", err)
+	}
+	if _, err := Parse("[[ -f a.txt &&"); err != ErrIncomplete {
+		t.Fatalf("want ErrIncomplete for unterminated [[ mid-&&, got %v", err)
+	}
+	if _, err := Parse("[[ ( -f a.txt"); err != ErrIncomplete {
+		t.Fatalf("want ErrIncomplete for unterminated ( inside [[, got %v", err)
+	}
+
+	// A genuinely malformed expression is a real syntax error, not "needs
+	// more input" -- e.g. a unary operator with no operand before ]].
+	if _, err := Parse("[[ -f ]]"); err == nil || err == ErrIncomplete {
+		t.Fatalf("want a syntax error for -f with no operand, got %v", err)
+	}
+}
+
 // TestConsecutiveSeparatorsIsSyntaxError reproduces the reported bug: a
 // second separator immediately after the first -- e.g. `cmd &;` -- has no
 // command between them, which bash rejects as a syntax error ("syntax error

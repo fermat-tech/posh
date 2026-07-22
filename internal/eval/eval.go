@@ -495,6 +495,9 @@ func (sh *Shell) Eval(node parser.Node) int {
 		}
 		sh.lastExit = 1
 		return 1
+
+	case *parser.CondCmd:
+		return sh.evalCondCmd(n)
 	}
 	return 0
 }
